@@ -43,6 +43,7 @@ add_executable(EBSPDims      ${CMAKE_CURRENT_LIST_DIR}/ebsp_dims.cpp     )
 add_executable(mp2sht        ${CMAKE_CURRENT_LIST_DIR}/mp2sht.cpp        )
 add_executable(sht2png       ${CMAKE_CURRENT_LIST_DIR}/sht2png.cpp       )
 add_executable(ShtWisdom     ${CMAKE_CURRENT_LIST_DIR}/sht_wisdom.cpp    )
+add_executable(IndexLaue     ${CMAKE_CURRENT_LIST_DIR}/laue.cpp          )
 
 install(TARGETS IndexEBSD MasterXcorr mp2sht sht2png ShtWisdom COMPONENT clt DESTINATION bin) # command line tools
 
