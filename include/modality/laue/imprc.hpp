@@ -35,8 +35,7 @@
 #ifndef _LAUE_IM_PRC_
 #define _LAUE_IM_PRC_
 
-#include "util/gaussian.hpp"
-#include "util/ahe.hpp"
+#include "idx/base.hpp"
 
 namespace emsphinx {
 
@@ -76,37 +75,37 @@ namespace emsphinx {
 namespace emsphinx {
 
 	namespace laue {
-    
-        //@brief: set processing parameters
-				//@param w: image width in pixels
-				//@param h: image height in pixels
-				template <typename Real> 
-        void setSize(const size_t w, const size_t h){
-          nPix = w * h;
-        }
-    
-        //@brief    : process an image out of place (background subtract and/or AHE)
-				//@param im : image to process
-				//@param buf: location to write floating point processed image
-        template <typename Real>
-				void process(uint8_t  const * const im, Real * const buf) {
-          for(size_t i = 0; i < nPix; i++){
-            buf[i] = (Real) im[i];
-          }
-        }
-        template <typename Real>
-				void process(uint16_t  const * const im, Real * const buf) {
-          for(size_t i = 0; i < nPix; i++){
-            buf[i] = (Real) im[i];
-          }
-        }
-        template <typename Real>
-				void process(float  const * const im, Real * const buf) {
-          for(size_t i = 0; i < nPix; i++){
-            buf[i] = (Real) im[i];
-          }
-        }
-        
+	
+		//@brief: set processing parameters
+		//@param w: image width in pixels
+		//@param h: image height in pixels
+		template <typename Real> 
+		void PatternProcessor<Real>::setSize(const size_t w, const size_t h){
+		  nPix = w * h;
+		}
+	
+		//@brief    : process an image out of place (background subtract and/or AHE)
+		//@param im : image to process
+		//@param buf: location to write floating point processed image
+		template <typename Real>
+		void PatternProcessor<Real>::process(uint8_t  const * const im, Real * const buf) {
+		  for(size_t i = 0; i < nPix; i++){
+			buf[i] = (Real) im[i];
+		  }
+		}
+		template <typename Real>
+		void PatternProcessor<Real>::process(uint16_t  const * const im, Real * const buf) {
+		  for(size_t i = 0; i < nPix; i++){
+			buf[i] = (Real) im[i];
+		  }
+		}
+		template <typename Real>
+		void PatternProcessor<Real>::process(float  const * const im, Real * const buf) {
+		  for(size_t i = 0; i < nPix; i++){
+			buf[i] = (Real) im[i];
+		  }
+		}
+		
   }//laue
 }//emsphinx
 

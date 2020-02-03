@@ -35,6 +35,8 @@
 #include <iostream>
 
 #include "modality/laue/nml.hpp"
+#include "modality/laue/pattern.hpp"
+#include "modality/laue/imprc.hpp"
 
 int main(int argc, char *argv[]) {
 
