@@ -78,22 +78,15 @@ namespace emsphinx {
 
 		};
 
-		/*
 		//helper for back projecting from an Laue detector -> sphere
 		template <typename Real>
 		struct BackProjector : public emsphinx::BackProjector<Real> {
-			struct Constants;//helper struct to hold read only constants
-			const std::shared_ptr<const Constants> pLut;//read only values (can be shared across threads)
-			std::vector<Real>                      rPat;//space for pattern as real
-			fft::vector<Real>                      sWrk;//work space for pattern rescaler
-			std::vector<Real>                      iVal;//space for intermediate interpolation result
+			GeomParam             geo ;//geometry
+			const size_t          dim ;//side length of spherical grid
+			image::Rescaler<Real> sclr;//pattern rescaler
 
-			//@brief    : construct a back projector
-			//@param geo: detector geometry to back project from
-			//@param dim: side length of square legendre grid to back project onto
-			//@param fct: additional scale factor for detector resizing
-			//@param qu : quaternion to rotate detector location by
-			BackProjector(Geometry<Real> geo, const size_t dim, const Real fct, Real const * const qu = NULL);
+			//TODO: add in bandpass filtering parameters
+			BackProjector(GeomParam g, const size_t d) : geo(g), dim(d), sclr(geo.Ny, geo.Nz, 1.0, fft::flag::Plan::Patient) {}
 
 			//@brief    : unproject a pattern from the detector to a square grid
 			//@param pat: pattern to back project to unit sphere
@@ -105,30 +98,9 @@ namespace emsphinx {
 			//@brief : get a copy of the stored back projector
 			//@return: unique pointer to copy of current projector
 			std::unique_ptr<emsphinx::BackProjector<Real> > clone() const {return std::unique_ptr<BackProjector>(new BackProjector(*this));}
-
-			//@brief    : build a mask of spherical pixels covered by the detector
-			//@param sph: location to write mask
-			void mask(Real * const sph);
 		};
 
 
-		//helper struct to hold read only constants needed by BackProjector (for sharing across threads)
-		template <typename Real>
-		struct BackProjector<Real>::Constants {
-			std::vector< image::BiPix<Real> > iPts;//interpolation coefficients
-			std::vector<Real>                 omeg;//solid angles of iPts (relative to average spherical pixel size)
-			Real                              omgW;//sum of omeg (in window)
-			Real                              omgS;//sum of omeg (over sphere)
-			image::Rescaler<Real>             sclr;//pattern rescaler
-
-			//@brief    : construct a back projector
-			//@param geo: detector geometry to back project from
-			//@param dim: side length of square legendre grid to back project onto
-			//@param fct: additional scale factor for detector resizing
-			//@param qu : quaternion to rotate detector location by
-			Constants(Geometry<Real> geo, const size_t dim, const Real fct, Real const * const qu = NULL);
-		};
-		*/
 
 	}//laue
 
@@ -163,7 +135,32 @@ namespace emsphinx {
 		template <typename Real>
 		bool Geometry<Real>::interpolatePixel(Real const * const n, image::BiPix<Real> * const pix) const {
 			//sanity check
-			if(std::signbit(n[2])) return false;//can't project through sample
+			// if(std::signbit(n[2])) return false;//can't project through sample
+/*
+L sample = detector distance
+kk = wave number
+
+[X,Y] --> [x,0,z]
+        phi = datan2(X, Y) - pi/2
+        r = sqrt(X*X+Y*Y)
+        r2 = r*r
+        p = sqrt((kk+L)**2+r2)
+        q = 1.0/sqrt(2.0*p**2-2.0*(kk+L)*p)
+        x = (kk + L - p) * q
+        y = 0.0
+        z = r * q
+
+[x,0,z] --> [X,Y]
+	
+		q = z / r
+		p = (kk + L)
+*/
+
+
+
+
+
+
 
 			/*
 			//compute angle between detector and sample normal
@@ -253,87 +250,6 @@ namespace emsphinx {
 		////////////////////////////////////////////////////////////////////////
 		//                           BackProjector                            //
 		////////////////////////////////////////////////////////////////////////
-/*
-		template <typename Real>
-		BackProjector<Real>::Constants::Constants(Geometry<Real> geo, const size_t dim, const Real fct, Real const * const qu) :
-			sclr(geo.w, geo.h, geo.scaleFactor(dim) * fct, fft::flag::Plan::Patient)//we're going to be doing lots of 
-		{
-			//compute normals and solid angles of square legendre grid
-			std::vector<Real> xyz(dim * dim * 3);
-			square::legendre::normals(dim, xyz.data());
-			std::vector<Real> omegaRing = square::solidAngles<Real>(dim, square::Layout::Legendre);
-
-			//rescale detector
-			Geometry<Real> g = geo.rescale(sclr.wOut, sclr.hOut);
-
-			//determine weights north hemisphere
-			image::BiPix<Real> p;
-			for(size_t i = 0; i < xyz.size() / 3; i++) {//loop over square legendre grid points
-				//get direction and apply rotatation
-				Real n[3];
-				if(NULL != qu) {
-					xtal::quat::rotateVector(qu, xyz.data() + 3 * i, n);
-				} else {
-					std::copy(xyz.data() + 3 * i, xyz.data() + 3 * i + 3, n);
-				}
-
-				//save interpolation weights if it hits the detector
-				if(g.interpolatePixel(n, &p)) {
-					p.idx = i;
-					iPts.push_back(p);
-					omeg.push_back(omegaRing[square::ringNum(dim, i)]);
-				}
-			}
-
-			//determine weights south hemisphere
-			for(size_t i = 0; i < xyz.size() / 3; i++) {//loop over square legendre grid points
-				//split into x and y indices
-				const size_t y = i / dim;
-				if(y == 0 || y+1 == dim) continue;//dont' double count equator
-				const size_t x = i - dim * y;
-				if(x == 0 || x+1 == dim) continue;//dont' double count equator
-				xyz[3*i+2] = -xyz[3*i+2];//move normal to southern hemisphere
-
-				//get direction and apply rotatation
-				Real n[3];
-				if(NULL != qu) {
-					xtal::quat::rotateVector(qu, xyz.data() + 3 * i, n);
-				} else {
-					std::copy(xyz.data() + 3 * i, xyz.data() + 3 * i + 3, n);
-				}
-
-				//save interpolation weights if it hits the detector
-				if(g.interpolatePixel(n, &p)) {
-					p.idx = i;
-					iPts.push_back(p);
-					omeg.push_back(omegaRing[square::ringNum(dim, i)]);
-				}
-			}
-
-			//accumulate solid angle sums
-			omgW = std::accumulate(omeg.cbegin(), omeg.cend(), Real(0));
-			omgS = 0;
-			for(size_t j = 0; j < dim; j++) {
-				for(size_t i = 0; i < dim; i++) {
-					const Real& o = omegaRing[square::ringNum(dim, j * dim + i)];
-					const bool eq = j == 0 || i == 0 || j == dim-1 || i == dim-1;//are we on the equator
-					omgS += o;
-					if(!eq) omgS += o;//don't double count equator
-				}
-			}
-		}
-
-		//@brief    : construct a back projector
-		//@param geo: detector geometry to back project from
-		//@param dim: side length of square legendre grid to back project onto
-		//@param fct: additional scale factor for detector resizing
-		//@param qu : quaternion to rotate detector location by
-		template <typename Real>
-		BackProjector<Real>::BackProjector(Geometry<Real> geo, const size_t dim, const Real fct, Real const * const qu) :
-			pLut(std::make_shared<const Constants>(geo, dim, fct, qu)),
-			rPat(std::max(geo.w * geo.h, pLut->sclr.wOut * pLut->sclr.hOut)),
-			sWrk(pLut->sclr.allocateWork()),
-			iVal(pLut->iPts.size()) {}
 
 		//@brief    : unproject a pattern from the detector to a square grid
 		//@param pat: pattern to back project to unit sphere
@@ -343,9 +259,63 @@ namespace emsphinx {
 		template <typename Real>
 		Real BackProjector<Real>::unproject(Real * const pat, Real * const sph, Real * const iq) {
 			//rescale pattern
-			Real vIq = pLut->sclr.scale(pat, rPat.data(), sWrk.data(), true, 0, NULL != iq);//rescale
-			if(NULL != iq) *iq = vIq;//save iq value if needed
+			// Real vIq = sclr.scale(pat, rPat.data(), sWrk.data(), true, 0, NULL != iq);//rescale (TODO this is where bandpass could be added in)
+			// if(NULL != iq) *iq = vIq;//save iq value if needed
 
+			//zero out sphere
+			std::fill(sph, sph + dim * dim * 2, Real(0));
+
+			const double L = geo.sampletodetector;
+			const double kk0 = geo.VoltageL * 5067730.76;// k = E / (hbar * c), 1 keV / (hbar * c) = 5067730.76 mm^-1
+			const double kk1 = geo.VoltageH * 5067730.76;// k = E / (hbar * c), 1 keV / (hbar * c) = 5067730.76 mm^-1
+			const double kl0 = kk0 + L;
+			const double kl1 = kk1 + L;
+			xtal::Quat<double> yquat(0.7071067811865475, 0, -0.7071067811865475, 0);
+
+			//now loop over pattern back projecting
+			image::LineWeight<double> lineWeight;
+			for(size_t j = 0; j < geo.Nz; j++) {//loop over rows
+				const double y = double(j) - double(geo.Nz)/2 * geo.ps;
+				for(size_t i = 0; i < geo.Ny; i++) {//loop over cols
+					const double x = double(i) - double(geo.Ny)/2 * geo.ps;
+					
+					// get the azimuthal angle phi from x and y
+					const double phi = std::atan2(y, x) - 1.570796326794897;
+					const double cPhi =  std::cos(phi / 2);
+					const double sPhi = -std::sin(phi / 2);
+					const double r2 = x * x + y * y;
+					const double r = std::sqrt(r2);
+					const double p0 = std::sqrt( kl0 * kl0 + r2 );
+					const double p1 = std::sqrt( kl1 * kl1 + r2 );
+					const double q0 = 1.0 / std::sqrt( ( p0 - kl0 ) * p0 * 2 );
+					const double q1 = 1.0 / std::sqrt( ( p1 - kl1 ) * p0 * 2 );
+
+					//compute sphere direction for kk0 and kk1
+					double n0[3] = {(kl0 - p0) * q0, 0, r * q0};
+					double n1[3] = {(kl1 - p1) * q1, 0, r * q1};
+
+					// these are the normals in the azimuthal plane (x,z); next we need to apply the rotation by phi 
+					// around x to bring the vector into the correct location
+					// also rotate these unit vectors by 90° around the y-axis so that they fall in along the equator
+					xtal::Quat<double> quat(cPhi, sPhi, 0, 0);
+					quat.rotateVector(n0, n0);
+					quat.rotateVector(n1, n1);
+					yquat.rotateVector(n0, n0);
+					yquat.rotateVector(n1, n1);
+					
+					// and project both points onto the Lambert square
+					double X0, Y0, X1, Y1;
+					square::lambert::sphereToSquare(n0[0], n0[1], n0[2], X0, Y0);
+					square::lambert::sphereToSquare(n1[0], n1[1], n1[2], X1, Y1);
+
+					//finally distribute intensity across square image
+					const Real vPat = pat[j * geo.Ny + i];
+					lineWeight.bilinearCoeff(X0, Y0, X1, Y1, dim, dim);
+					for(const std::pair< size_t, Real>& p : lineWeight.pairs) sph[p.first] += p.second * vPat;
+				}
+			}
+
+			/*
 			//interpolate pattern intensities and compute weighted mean
 			image::BiPix<Real> const * const pIpt = pLut->iPts.data();
 			for(size_t i = 0; i < pLut->iPts.size(); i++) iVal[i] = pIpt[i].interpolate(rPat.data());//determine interpolated values
@@ -374,9 +344,11 @@ namespace emsphinx {
 				static const Real var = std::sqrt(pLut->omgW / pLut->omgS * emsphinx::Constants<Real>::pi * Real(4));//standard deviation within window (since we normalized to 1)
 				return var;
 			}
+			*/
 
 		}
 
+	/*
 		//@brief    : build a mask of spherical pixels covered by the detector
 		//@param sph: location to write mask
 		template <typename Real>

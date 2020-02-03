@@ -53,15 +53,16 @@ namespace emsphinx {
 			 * Y is horizontal on the detector
 			 * Z is vertical on the detector
 			 */
-			double       Dy, Dz     ;//position of through beam on detector in mm relative to detector center
-			double       Lw, Lh     ;//width/height of X-Ray slits in mm
-			double   Lx, Ly, Lz     ;//position of slit opening center in mm
-			double   Sx             ;//position of sample
-			double   VoltageL       ;//lower  X-Ray energy in kV
-			double   VoltageH       ;//higher X-Ray energy in kV
-			double   samplethickness;//thickness of sample in mm
-			double   ps             ;//pixel size in mm
-			uint16_t    Ny, Nz      ;//detector size in pixels
+			double       Dy, Dz      ;//position of through beam on detector in mm relative to detector center
+			double       Lw, Lh      ;//width/height of X-Ray slits in mm
+			double   Lx, Ly, Lz      ;//position of slit opening center in mm
+			double   Sx              ;//position of sample
+			double   sampletodetector;//sample detector distance in mm
+			double   VoltageL        ;//lower  X-Ray energy in kV
+			double   VoltageH        ;//higher X-Ray energy in kV
+			double   samplethickness ;//thickness of sample in 
+			double   ps              ;//pixel size in mm
+			uint16_t    Ny, Nz       ;//detector size in pixels
 
 			//@brief: initialize / reset values with defaults
 			void clear();
@@ -135,13 +136,14 @@ namespace emsphinx {
 
 		//@brief: initialize / reset values with defaults
 		void GeomParam::clear() {
-			     Dy = Dz    = NAN;
-			     Lw = Lh    = NAN;
-			Sx              = NAN;
-			VoltageL        = NAN;
-			VoltageH        = NAN;
-			samplethickness = NAN;
-			ps              = NAN;
+			     Dy = Dz     = NAN;
+			     Lw = Lh     = NAN;
+			Sx               = NAN;
+			sampletodetector = NAN;
+			VoltageL         = NAN;
+			VoltageH         = NAN;
+			samplethickness  = NAN;
+			ps               = NAN;
 			Ny = Nz = 0;
 		}
 
@@ -158,6 +160,7 @@ namespace emsphinx {
 			if(Lx < 5.0 || Lx > 1000.0) throw std::runtime_error("unreasonable slit X (outside [5, 1000] mm)");
 			if(Ly < -100.0 || Ly > 100.0) throw std::runtime_error("unreasonable slit Y (outside [-100, 100] mm)");
 			if(Lz < -100.0 || Lz > 100.0) throw std::runtime_error("unreasonable slit Z (outside [-100, 100] mm)");
+			if(sampletodetector < 5.0 || sampletodetector > 10000.0) throw std::runtime_error("unreasonable sample detector distance (outside [5, 10000] mm)");
 			if(Sx < 5.0 || Sx > 1000.0) throw std::runtime_error("unreasonable sample X (outside [5, 1000] mm)");
 			if(VoltageL > VoltageH) throw std::runtime_error("voltage upper bound must be >= lower bound");
 			if(VoltageL < 10.0 || VoltageL > 100.0) throw std::runtime_error("unreasonable voltage (outside [10, 100] kV)");
@@ -172,20 +175,21 @@ namespace emsphinx {
 			clear();
 			try {
 				H5::DataSpace ds(H5S_SCALAR);//single element data space
-				grp.openDataSet("Dy"             ).read(&Dy             , H5::PredType::NATIVE_DOUBLE, ds);
-				grp.openDataSet("Dz"             ).read(&Dz             , H5::PredType::NATIVE_DOUBLE, ds);
-				grp.openDataSet("Lw"             ).read(&Lw             , H5::PredType::NATIVE_DOUBLE, ds);
-				grp.openDataSet("Lh"             ).read(&Lh             , H5::PredType::NATIVE_DOUBLE, ds);
-				grp.openDataSet("Lx"             ).read(&Lx             , H5::PredType::NATIVE_DOUBLE, ds);
-				grp.openDataSet("Ly"             ).read(&Ly             , H5::PredType::NATIVE_DOUBLE, ds);
-				grp.openDataSet("Lz"             ).read(&Lz             , H5::PredType::NATIVE_DOUBLE, ds);
-				grp.openDataSet("Sx"             ).read(&Sx             , H5::PredType::NATIVE_DOUBLE, ds);
-				grp.openDataSet("VoltageL"       ).read(&VoltageL       , H5::PredType::NATIVE_DOUBLE, ds);
-				grp.openDataSet("VoltageH"       ).read(&VoltageH       , H5::PredType::NATIVE_DOUBLE, ds);
-				grp.openDataSet("samplethickness").read(&samplethickness, H5::PredType::NATIVE_DOUBLE, ds);
-				grp.openDataSet("ps"             ).read(&ps             , H5::PredType::NATIVE_DOUBLE, ds);
-				grp.openDataSet("Ny"             ).read(&Ny             , H5::PredType::NATIVE_UINT16, ds);
-				grp.openDataSet("Nz"             ).read(&Nz             , H5::PredType::NATIVE_UINT16, ds);
+				grp.openDataSet("Dy"              ).read(&Dy              , H5::PredType::NATIVE_DOUBLE, ds);
+				grp.openDataSet("Dz"              ).read(&Dz              , H5::PredType::NATIVE_DOUBLE, ds);
+				grp.openDataSet("Lw"              ).read(&Lw              , H5::PredType::NATIVE_DOUBLE, ds);
+				grp.openDataSet("Lh"              ).read(&Lh              , H5::PredType::NATIVE_DOUBLE, ds);
+				grp.openDataSet("Lx"              ).read(&Lx              , H5::PredType::NATIVE_DOUBLE, ds);
+				grp.openDataSet("Ly"              ).read(&Ly              , H5::PredType::NATIVE_DOUBLE, ds);
+				grp.openDataSet("Lz"              ).read(&Lz              , H5::PredType::NATIVE_DOUBLE, ds);
+				grp.openDataSet("Sx"              ).read(&Sx              , H5::PredType::NATIVE_DOUBLE, ds);
+				grp.openDataSet("sampletodetector").read(&sampletodetector, H5::PredType::NATIVE_DOUBLE, ds);
+				grp.openDataSet("VoltageL"        ).read(&VoltageL        , H5::PredType::NATIVE_DOUBLE, ds);
+				grp.openDataSet("VoltageH"        ).read(&VoltageH        , H5::PredType::NATIVE_DOUBLE, ds);
+				grp.openDataSet("samplethickness" ).read(&samplethickness , H5::PredType::NATIVE_DOUBLE, ds);
+				grp.openDataSet("ps"              ).read(&ps              , H5::PredType::NATIVE_DOUBLE, ds);
+				grp.openDataSet("Ny"              ).read(&Ny              , H5::PredType::NATIVE_UINT16, ds);
+				grp.openDataSet("Nz"              ).read(&Nz              , H5::PredType::NATIVE_UINT16, ds);
 			} catch (H5::Exception& e) {//convert hdf5 exceptions into std::exception
 				std::ostringstream ss;
 				ss << "H5 error attempting to read Laue geometry:\n";
