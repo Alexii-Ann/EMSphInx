@@ -138,6 +138,27 @@ namespace image {
 		void bilinearCoeff(Real x, Real y, const size_t w, const size_t h);
 	};
 
+	//@brief: structure to hold indices/weights to anti-aliased averaged along a line
+	//@reference: Wu, X. (1991). An efficient antialiasing technique. Acm Siggraph Computer Graphics, 25(4), 143-152.
+	template <typename Real>
+	struct LineWeight {
+		std::vector< std::pair< size_t, Real> > pairs;
+
+		//@brief    : interpolate by integrating along a the
+		//@param pat: detector pattern to interpolate from
+		//@return   : interpolated value
+		Real interpolate(Real const * const pat) const;
+
+		//@brief     : compute the indicies and coefficient to average over a line
+		//@param x0  : first fractional horizontal position in image [0,1]
+		//@param y0  : first fractional vertical position in image [0,1]
+		//@param x0  : second fractional horizontal position in image [0,1]
+		//@param y0  : second fractional vertical position in image [0,1]
+		//@param w   : width of image in pixels
+		//@param h   : height of image in pixels
+		void bilinearCoeff(Real x0, Real y0, Real x1, Real y1, const size_t w, const size_t h);
+	};
+
 	//helper for resacling images
 	template <typename Real>
 	class Rescaler {
@@ -548,6 +569,95 @@ namespace image {
 		wgts[1] = wy0 * wx1;
 		wgts[2] = wy1 * wx0;
 		wgts[3] = wy1 * wx1;
+	}
+
+	//@brief    : bilinearly interpolate a pattern at the spherical pixel
+	//@param pat: detector pattern to interpolate from
+	//@return   : interpolated value
+	template <typename Real>
+	Real LineWeight<Real>::interpolate(Real const * const pat) const {
+		Real v = 0;
+		for(const std::pair< size_t, Real>& p : pairs) v += pat[p.first] * p.second;
+		return v;
+	}
+
+	//@brief     : compute the indicies and coefficient to average over a line
+	//@param x0  : first fractional horizontal position in image [0,1]
+	//@param y0  : first fractional vertical position in image [0,1]
+	//@param x0  : second fractional horizontal position in image [0,1]
+	//@param y0  : second fractional vertical position in image [0,1]
+	//@param w   : width of image in pixels
+	//@param h   : height of image in pixels
+	template <typename Real>
+	void LineWeight<Real>::bilinearCoeff(Real x0, Real y0, Real x1, Real y1, const size_t w, const size_t h) {
+		//convert to fractional pixels
+		x0 *= w;
+		y0 *= h;
+		x1 *= w;
+		y1 *= h;
+		pairs.clear();
+ 
+		//determine if line is steep and compute slope
+		const bool steep = std::fabs(y1 - y0) > std::fabs(x1 - x0);
+		if (steep) {//handle steep case via symmetry
+			std::swap(x0, y0);
+			std::swap(x1, y1);
+		}
+		if (x0 > x1) {//handle right -> left via symmetry
+			std::swap(x0, x1);
+			std::swap(y0, y1);
+		}
+		const Real slope = (x1 == x0) ? 1 : (y1 - y0) / (x1 - x0);//don't divide by zero
+
+		//define function to accumulate 
+		std::function<void(int, int, Real)> plot = [this,w](int x, int y, Real v) {
+			this->pairs.push_back(std::pair<size_t, Real>(y*w+x, v));
+		};
+
+		//handle end points
+		std::function<Real(Real,Real)> func = [steep,slope,&plot](Real x, Real y) {
+			const int  ix = (int) std::round(x);
+			const Real yend = y - slope * (x - ix);
+			const int  iy = (int)yend;
+			const Real fy = yend - iy;
+			x += Real(0.5);
+			const Real xgap = Real(1) - ( x - (int)x );
+			if (steep) {
+				plot(iy    , ix, (Real(1) - fy) * xgap);
+				plot(iy + 1, ix,            fy  * xgap);
+			} else {
+				plot(ix, iy    , (Real(1) - fy) * xgap);
+				plot(ix, iy + 1,            fy  * xgap);
+			}
+			return yend + slope;
+		};
+
+		int xStart = (int) std::round(x0);
+		int xEnd   = (int) std::round(x1);
+		Real intery = func(x0, y0);
+		              func(x1, y1);
+
+		//accumulate remaining points
+		if (steep) {
+			for (int x = xStart + 1; x < xEnd  ; x++) {
+				const int  iy = (int)intery;
+				const Real fy =      intery - iy;
+				plot(iy    , x, Real(1) - fy);
+				plot(iy + 1, x,           fy);
+				intery += slope;
+			}
+		} else {
+			for (int x = xStart + 1; x < xEnd  ; x++) {
+				const int  iy = (int)intery;
+				const Real fy =      intery - iy;
+				plot(x, iy    , Real(1) - fy);
+				plot(x, iy + 1,           fy);
+				intery += slope;
+			}
+		}
+
+		//sort interpolation point (could renormalize if needed)
+		std::sort(pairs.begin(), pairs.end());
 	}
 
 	////////////////////////////////////////////////////////////////////////
