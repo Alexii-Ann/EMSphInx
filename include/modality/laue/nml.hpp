@@ -287,6 +287,7 @@ namespace emsphinx {
 			std::vector<int> dims = nml.getInts("bandPass");
 			if(2 != dims.size()) throw std::runtime_error("bandPass should have 2 values");
 			bandPass[0] = dims[0]; bandPass[1] = dims[1];
+			mask_ib.from_string(nml.getString("mask_ib"));
 
 			//parse indexing parameters
 			bw        = (size_t) nml.getInt ("bw"       );//what bandwidth should be used, if 2*bw-1 is product of small primes it is a good candidate for speed (fft is significant fraction of time): 32,38,41,53,63,68,74,88,95,113,123,158
@@ -297,7 +298,7 @@ namespace emsphinx {
 
 			//parse outputs
 			try {opath      = nml.getString("opath"     );} catch (...) {opath     .clear();}//if ipath isn't found we'll just use cwd
-			     dataFile   = nml.getString("datafile"  );
+			     outputFile = nml.getString("outputFile");
 
 			//check for unused inputs
 			sanityCheck();

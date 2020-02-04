@@ -615,19 +615,21 @@ namespace image {
 		};
 
 		//handle end points
-		std::function<Real(Real,Real)> func = [steep,slope,&plot](Real x, Real y) {
+		std::function<Real(Real,Real)> func = [steep,slope,&plot,w,h](Real x, Real y) {
 			const int  ix = (int) std::round(x);
 			const Real yend = y - slope * (x - ix);
 			const int  iy = (int)yend;
 			const Real fy = yend - iy;
 			x += Real(0.5);
 			const Real xgap = Real(1) - ( x - (int)x );
-			if (steep) {
-				plot(iy    , ix, (Real(1) - fy) * xgap);
-				plot(iy + 1, ix,            fy  * xgap);
-			} else {
-				plot(ix, iy    , (Real(1) - fy) * xgap);
-				plot(ix, iy + 1,            fy  * xgap);
+			if(iy + 1 < (steep ? w : h)) {
+				if (steep) {
+					plot(iy    , ix, (Real(1) - fy) * xgap);
+					plot(iy + 1, ix,            fy  * xgap);
+				} else {
+					plot(ix, iy    , (Real(1) - fy) * xgap);
+					plot(ix, iy + 1,            fy  * xgap);
+				}
 			}
 			return yend + slope;
 		};

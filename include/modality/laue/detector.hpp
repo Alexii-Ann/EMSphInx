@@ -124,17 +124,17 @@ namespace emsphinx {
 			geo(g.rescale(f)),
 			dim(d),
 			sclr(g.Ny, g.Nz, f, fft::flag::Plan::Patient),
-			rPat(std::max(g.Ny * g.Nz, sclr.wOut * sclr.hOut)),
+			rPat(std::max<size_t>(g.Ny * g.Nz, sclr.wOut * sclr.hOut)),
 			sWrk(sclr.allocateWork()),
 			omeg(d * d) {
 				//copy bandpass cutoffs
 				bPas[0] = b[0];
 				bPas[1] = b[1];
-
+				
 				//build mask of which points back project onto the detector
 				//this is equivalent to back projecting an image of 1
 				std::vector<Real> temp(sclr.wOut * sclr.hOut, 1);
-				doUnproject(temp.data(), omeg);//unproject onto solid angle
+				doUnproject(temp.data(), omeg.data());//unproject onto solid angle
 
 				//now scale omega points by solid angle of spherical pixel size
 				std::vector<Real> omegaRing = square::solidAngles<Real>(dim, square::Layout::Legendre);
@@ -180,7 +180,7 @@ namespace emsphinx {
 						const Real vs = s / stdev;
 						return vs;
 					} else {
-						return 0;
+						return Real(0);
 					}
 				}
 			);
@@ -193,7 +193,7 @@ namespace emsphinx {
 		template <typename Real>
 		void BackProjector<Real>:: doUnproject(Real const * const pat, Real * const sph) {
 			//zero out sphere
-			std::fill(sph, sph + dim * dim * 2, Real(0));
+			std::fill(sph, sph + dim * dim, Real(0));
 
 			const double L = geo.sampletodetector;
 			const double kk0 = geo.VoltageL * 5067730.76;// k = E / (hbar * c), 1 keV / (hbar * c) = 5067730.76 mm^-1
@@ -208,7 +208,6 @@ namespace emsphinx {
 				const double y = double(j) - double(geo.Nz)/2 * geo.ps;
 				for(size_t i = 0; i < geo.Ny; i++) {//loop over cols
 					const double x = double(i) - double(geo.Ny)/2 * geo.ps;
-
 					// get the azimuthal angle phi from x and y
 					const double phi = std::atan2(y, x) - 1.570796326794897;
 					const double cPhi =  std::cos(phi / 2);
@@ -238,7 +237,7 @@ namespace emsphinx {
 					square::lambert::sphereToSquare(n0[0], n0[1], n0[2], X0, Y0);
 					square::lambert::sphereToSquare(n1[0], n1[1], n1[2], X1, Y1);
 
-					//finally distribute intensity across square image
+					// finally distribute intensity across square image
 					const Real vPat = pat[j * geo.Ny + i];
 					lineWeight.bilinearCoeff(X0, Y0, X1, Y1, dim, dim);
 					for(const std::pair< size_t, Real>& p : lineWeight.pairs) sph[p.first] += p.second * vPat;
