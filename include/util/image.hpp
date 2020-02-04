@@ -244,6 +244,7 @@ namespace image {
 #include <numeric>
 #include <limits>
 #include <type_traits>
+#include <functional>
 
 #include "constants.hpp"
 
