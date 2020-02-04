@@ -50,43 +50,24 @@ namespace emsphinx {
 
 	namespace laue {
 
-		//@brief: helper for describing the geometry of a detector
-		template <typename Real>
-		struct Geometry {
-			GeomParam geo;
-
-			//@brief    : bilinearlly interpolate a pixel value for the given direction
-			//@param n  : unit direction to interpolate value for in the sample reference frame (pattern center is in +z direction)
-			//@param pix: [optional] location to store interpolation pixel
-			//@return   : true / false if the direction lies inside / outside the detector
-			bool interpolatePixel(Real const * const n, image::BiPix<Real> * const pix = NULL) const;
-
-			//@brief        : approximate the solid angle captured by a detector
-			//@param gridRes: side length of square lambert projection to grid over
-			//@return       : fractional solid angle i.e [0,1] not [0,4*pi]
-			Real solidAngle(size_t gridRes) const;
-
-			//@brief      : create a new detector geometry by rescaling the pixels size while maintaining solid angle
-			//@param scale: rescaling factor, must lie in [0, min(w, h)] with values < 1 corresponding to increasing pixel density
-			//@note       : this is analogous to continuous camera binning with e.g. scale = 4.0 corresponding to 4x4 camera binning
-			Geometry<Real> rescale(const Real scale) const;
-
-			//@brief    : compute the rescale factor required to make average detector pixel size the same as an average pixel on a square spherical grid
-			//@param dim: side length of square spherical grid to match pixel size to
-			//@return   : geometry scale factor to make average pixel sizes the same
-			Real scaleFactor(const size_t dim) const;
-
-		};
-
 		//helper for back projecting from an Laue detector -> sphere
 		template <typename Real>
 		struct BackProjector : public emsphinx::BackProjector<Real> {
-			GeomParam             geo ;//geometry
-			const size_t          dim ;//side length of spherical grid
-			image::Rescaler<Real> sclr;//pattern rescaler
+			GeomParam             geo    ;//geometry
+			const size_t          dim    ;//side length of spherical grid
+			image::Rescaler<Real> sclr   ;//pattern rescaler
+			std::vector<Real>     rPat   ;//space for pattern as real
+			fft::vector<Real>     sWrk   ;//work space for pattern rescaler
+			std::vector<Real>     omeg   ;//solid angle of each pixel (or 0 if there is no contribution from the detector)
+			Real                  omegSm ;//sum of omeg
+			size_t                bPas[2];//bandpass cutoffs
 
-			//TODO: add in bandpass filtering parameters
-			BackProjector(GeomParam g, const size_t d) : geo(g), dim(d), sclr(geo.Ny, geo.Nz, 1.0, fft::flag::Plan::Patient) {}
+			//@brief  : construct a back projector
+			//@param g: detector geometry to back project from
+			//@param d: side length of square legendre grid to back project onto
+			//@param f: additional scale factor for detector resizing
+			//@param b: bandpass parameters
+			BackProjector(GeomParam g, const size_t d, const Real f, uint16_t const * b);
 
 			//@brief    : unproject a pattern from the detector to a square grid
 			//@param pat: pattern to back project to unit sphere
@@ -98,9 +79,14 @@ namespace emsphinx {
 			//@brief : get a copy of the stored back projector
 			//@return: unique pointer to copy of current projector
 			std::unique_ptr<emsphinx::BackProjector<Real> > clone() const {return std::unique_ptr<BackProjector>(new BackProjector(*this));}
+
+			private:
+
+				//@brief: do actual backproject of an appropriately sized pattern
+				//@param pat: rescaled pattern to back project to unit sphere
+				//@param sph: location to write back projected pattern
+				void doUnproject(Real const * const pat, Real * const sph);
 		};
-
-
 
 	}//laue
 
@@ -125,131 +111,36 @@ namespace emsphinx {
 	namespace laue {
 
 		////////////////////////////////////////////////////////////////////////
-		//                              Geometry                              //
-		////////////////////////////////////////////////////////////////////////
-
-		//@brief    : bilinearlly interpolate a pixel value for the given direction
-		//@param n  : unit direction to interpolate value for in the sample reference frame (pattern center is in +z direction)
-		//@param pix: [optional] location to store interpolation pixel
-		//@return   : true / false if the direction lies inside / outside the detector
-		template <typename Real>
-		bool Geometry<Real>::interpolatePixel(Real const * const n, image::BiPix<Real> * const pix) const {
-			//sanity check
-			// if(std::signbit(n[2])) return false;//can't project through sample
-/*
-L sample = detector distance
-kk = wave number
-
-[X,Y] --> [x,0,z]
-        phi = datan2(X, Y) - pi/2
-        r = sqrt(X*X+Y*Y)
-        r2 = r*r
-        p = sqrt((kk+L)**2+r2)
-        q = 1.0/sqrt(2.0*p**2-2.0*(kk+L)*p)
-        x = (kk + L - p) * q
-        y = 0.0
-        z = r * q
-
-[x,0,z] --> [X,Y]
-	
-		q = z / r
-		p = (kk + L)
-*/
-
-
-
-
-
-
-
-			/*
-			//compute angle between detector and sample normal
-			static const Real degToRad = emsphinx::Constants<Real>::pi / 180;
-			const Real alpha = (Real(90) - sTlt + dTlt) * degToRad;//angle between sample and detector is 90 with no tilts, increasing sample tilt decreases the angle, increasing camera tilt increases the angle
-			if(std::fabs(alpha) > emsphinx::Constants<Real>::pi_2) throw std::runtime_error("pattern center not on detector");//beyond +/-90 the detector is behind the sample
-
-			//compute sin / cos of angle and distance to detector
-			const Real sA = std::sin(alpha);
-			const Real cA = std::sqrt(Real(1) - sA * sA);//cos(alpha)
-			const Real d =  sDst / (n[0] * sA + n[2] * cA);
-			if(std::signbit(d)) return false;//negative distance
-
-			//compute offset from pattern center in microns
-			const Real x =                   n[1]  * d;
-			const Real y = (sA * n[2] - cA * n[0]) * d;
-
-			//convert from microns to fractional position (0->100%) and check if we're inside the detector
-			const Real X = (cX + x / pX) / w + Real(0.5);
-			      Real Y = (cY + y / pY) / h + Real(0.5);
-
-			// check if we're inside the detector
-			if(std::signbit(X) || std::signbit(Y) || X > 1 || Y > 1) return false;//outside of frame
-
-			//check against circular mask if needed
-			if(circ) {
-				const Real dX = (X - Real(0.5)) * w;//horizontal distance from center in pixels
-				const Real dY = (Y - Real(0.5)) * h;//vertical distance from center in pixels
-				const Real r = Real(std::min(w, h)) / 2;//radius of circular mask
-				if(r * r < dX * dX + dY * dY) return false;
-			}
-
-			//if we made it this far we're in frame, compute relative contribution from neighboring pixels
-			if(pix != NULL) pix->bilinearCoeff(X, Y, w, h);
-			return true;
-			*/
-			return false;
-		}
-
-		//@brief        : approximate the solid angle captured by a detector
-		//@param gridRes: side length of square lambert projection to grid over
-		//@return       : fractional solid angle i.e [0,1] not [0,4*pi]
-		template <typename Real>
-		Real Geometry<Real>::solidAngle(size_t gridRes) const {
-			//loop over northern hemisphere
-			Real XY[2], xyz[3];
-			size_t goodPoints = 0;
-			for(size_t j = 0; j <= gridRes; j++) {//loop over rows of square projection
-				XY[1] = Real(j) / gridRes;
-				for(size_t i = 0; i <= gridRes; i++) {//loop over columns of square projection
-					XY[0] = Real(i) / gridRes;
-					square::lambert::squareToSphere(XY[0], XY[1], xyz[0], xyz[1], xyz[2]);
-					if(interpolatePixel(xyz)) ++goodPoints;//count this point if it falls on the detector
-				}
-			}
-			const size_t totalPoints = (gridRes * gridRes + (gridRes - 2) * (gridRes - 2));//total number of points in both hemispheres (don't double count equators)
-			return Real(goodPoints) / totalPoints;//count fraction of grid points on detector
-		}
-
-		//@brief      : create a new detector geometry by rescaling the pixels size while maintaining solid angle
-		//@param scale: rescaling factor, must lie in [0, min(w, h)] with values < 1 corresponding to increasing pixel density
-		//@note       : this is analogous to continuous camera binning with e.g. scale = 4.0 corresponding to 4x4 camera binning
-		template <typename Real>
-		Geometry<Real> Geometry<Real>::rescale(const Real scale) const {
-			const size_t wNew = (size_t) std::round(Real(geo.Ny) / scale);
-			const size_t hNew = (size_t) std::round(Real(geo.Nz) / scale);
-			if(wNew == 0 || hNew == 0) throw std::runtime_error("cannot rescale detector to less than 1 pixel");
-			
-			//copy everything and update size
-			Geometry<Real> geom(*this);
-			geom.geo.Ny = wNew;
-			geom.geo.Nz = hNew;
-			geom.ps *= scale;
-			return geom;
-		}
-
-		//@brief    : compute the rescale factor required to make average detector pixel size the same as an average pixel on a square spherical grid
-		//@param dim: side length of square spherical grid to match pixel size to
-		//@return   : geometry scale factor to make average pixel sizes the same
-		template <typename Real>
-		Real Geometry<Real>::scaleFactor(const size_t dim) const {
-			const size_t sqrPix = dim * dim * 2 - (dim - 1) * 4;//number of pixels in square grid
-			const size_t detPix = geo.Ny * geo.Nz;//number of pixels on detector
-			return std::sqrt(solidAngle(501) * sqrPix / detPix);
-		}
-
-		////////////////////////////////////////////////////////////////////////
 		//                           BackProjector                            //
 		////////////////////////////////////////////////////////////////////////
+
+		//@brief  : construct a back projector
+		//@param g: detector geometry to back project from
+		//@param d: side length of square legendre grid to back project onto
+		//@param f: additional scale factor for detector resizing
+		//@param b: bandpass parameters 
+		template <typename Real>
+		BackProjector<Real>::BackProjector(GeomParam g, const size_t d, const Real f, uint16_t const * b) :
+			geo(g.rescale(f)),
+			dim(d),
+			sclr(g.Ny, g.Nz, f, fft::flag::Plan::Patient),
+			rPat(std::max(g.Ny * g.Nz, sclr.wOut * sclr.hOut)),
+			sWrk(sclr.allocateWork()),
+			omeg(d * d) {
+				//copy bandpass cutoffs
+				bPas[0] = b[0];
+				bPas[1] = b[1];
+
+				//build mask of which points back project onto the detector
+				//this is equivalent to back projecting an image of 1
+				std::vector<Real> temp(sclr.wOut * sclr.hOut, 1);
+				doUnproject(temp.data(), omeg);//unproject onto solid angle
+
+				//now scale omega points by solid angle of spherical pixel size
+				std::vector<Real> omegaRing = square::solidAngles<Real>(dim, square::Layout::Legendre);
+				for(size_t i = 0; i < omeg.size(); i++) omeg[i] *= omegaRing[square::ringNum(dim, i)];
+				omegSm = std::accumulate(omeg.begin(), omeg.end(), Real(0));
+			}
 
 		//@brief    : unproject a pattern from the detector to a square grid
 		//@param pat: pattern to back project to unit sphere
@@ -259,9 +150,48 @@ kk = wave number
 		template <typename Real>
 		Real BackProjector<Real>::unproject(Real * const pat, Real * const sph, Real * const iq) {
 			//rescale pattern
-			// Real vIq = sclr.scale(pat, rPat.data(), sWrk.data(), true, 0, NULL != iq);//rescale (TODO this is where bandpass could be added in)
-			// if(NULL != iq) *iq = vIq;//save iq value if needed
+			Real vIq = sclr.scale(pat, rPat.data(), sWrk.data(), true, bPas[0], NULL != iq);//rescale (TODO this is where bandpass could be added in)
+			if(NULL != iq) *iq = vIq;//save iq value if needed
 
+			//do the back projection
+			doUnproject(rPat.data(), sph);
+
+			//make weighted mean 0
+			const Real vMean = std::inner_product(omeg.begin(), omeg.end(), sph, Real(0)) / omegSm;
+			Real stdev(0);
+			std::transform(omeg.begin(), omeg.end(), sph, sph,
+				[vMean,&stdev](const Real o, const Real s){
+					if(o > Real(0)) {
+						const Real vs = s - vMean;
+						stdev += vs * vs * o;
+						return vs;
+					} else {
+						return Real(0);
+					}
+				}
+			);
+			stdev = std::sqrt(stdev / omegSm);
+
+			//now make standard deviation 1 and compute sqrt(sumsq(intensity))
+			Real var(0);
+			std::transform(omeg.begin(), omeg.end(), sph, sph,
+				[stdev](const Real o, const Real s){
+					if(o > Real(0)) {
+						const Real vs = s / stdev;
+						return vs;
+					} else {
+						return 0;
+					}
+				}
+			);
+			return 1;
+		}
+
+		//@brief: do actual backproject of an appropriately sized pattern
+		//@param pat: rescaled pattern to back project to unit sphere
+		//@param sph: location to write back projected pattern
+		template <typename Real>
+		void BackProjector<Real>:: doUnproject(Real const * const pat, Real * const sph) {
 			//zero out sphere
 			std::fill(sph, sph + dim * dim * 2, Real(0));
 
@@ -278,7 +208,7 @@ kk = wave number
 				const double y = double(j) - double(geo.Nz)/2 * geo.ps;
 				for(size_t i = 0; i < geo.Ny; i++) {//loop over cols
 					const double x = double(i) - double(geo.Ny)/2 * geo.ps;
-					
+
 					// get the azimuthal angle phi from x and y
 					const double phi = std::atan2(y, x) - 1.570796326794897;
 					const double cPhi =  std::cos(phi / 2);
@@ -314,48 +244,7 @@ kk = wave number
 					for(const std::pair< size_t, Real>& p : lineWeight.pairs) sph[p.first] += p.second * vPat;
 				}
 			}
-
-			/*
-			//interpolate pattern intensities and compute weighted mean
-			image::BiPix<Real> const * const pIpt = pLut->iPts.data();
-			for(size_t i = 0; i < pLut->iPts.size(); i++) iVal[i] = pIpt[i].interpolate(rPat.data());//determine interpolated values
-			const Real mean = std::inner_product(iVal.cbegin(), iVal.cend(), pLut->omeg.cbegin(), Real(0)) / pLut->omgW;//compute weighted average
-
-			//make mean zero and compute weighted standard deviation
-			Real stdev = 0;
-			for(size_t i = 0; i < iVal.size(); i++) {
-				iVal[i] -= mean;
-				stdev += iVal[i] * iVal[i] * pLut->omeg[i];
-			}
-			stdev = std::sqrt(stdev / pLut->omgW);
-
-			if(Real(0) == stdev) {//the back projected image had no contrast
-				//copy to output grid making value uniformly 1
-				for(size_t i = 0; i < pLut->iPts.size(); i++) sph[pIpt[i].idx] = Real(1);
-				return 0;
-			} else {
-				//make standard deviation 1
-				for(size_t i = 0; i < iVal.size(); i++) iVal[i] /= stdev;
-
-				//copy to output grid making mean 0
-				for(size_t i = 0; i < pLut->iPts.size(); i++) sph[pIpt[i].idx] = iVal[i];
-
-				//compute sum if needed
-				static const Real var = std::sqrt(pLut->omgW / pLut->omgS * emsphinx::Constants<Real>::pi * Real(4));//standard deviation within window (since we normalized to 1)
-				return var;
-			}
-			*/
-
 		}
-
-	/*
-		//@brief    : build a mask of spherical pixels covered by the detector
-		//@param sph: location to write mask
-		template <typename Real>
-		void BackProjector<Real>::mask(Real * const sph) {
-			for(const image::BiPix<Real>& p: pLut->iPts) sph[p.idx] = 1;
-		}
-	*/
 
 	}//laue
 

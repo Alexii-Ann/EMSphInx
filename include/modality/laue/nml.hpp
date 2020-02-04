@@ -74,6 +74,11 @@ namespace emsphinx {
 			//@brief    : read geometry data from an h5 file
 			//@param grp: hdf5 group to read data from
 			void read(H5::Group grp);
+
+			//@brief      : create a new detector geometry by rescaling the pixels size while maintaining solid angle
+			//@param scale: rescaling factor, must lie in [0, min(w, h)] with values < 1 corresponding to increasing pixel density
+			//@note       : this is analogous to continuous camera binning with e.g. scale = 4.0 corresponding to 4x4 camera binning
+			GeomParam rescale(const double scale) const;
 		};
 
 		//@brief: encapsulation of all the parameters needed for Laue indexing
@@ -197,6 +202,22 @@ namespace emsphinx {
 				ss << "detailed message:\n" << e.getCDetailMsg();
 				throw std::runtime_error(ss.str());
 			}
+		}
+
+		//@brief      : create a new detector geometry by rescaling the pixels size while maintaining solid angle
+		//@param scale: rescaling factor, must lie in [0, min(w, h)] with values < 1 corresponding to increasing pixel density
+		//@note       : this is analogous to continuous camera binning with e.g. scale = 4.0 corresponding to 4x4 camera binning
+		GeomParam GeomParam::rescale(const double scale) const {
+			const size_t wNew = (size_t) std::round(double(Ny) / scale);
+			const size_t hNew = (size_t) std::round(double(Nz) / scale);
+			if(wNew == 0 || hNew == 0) throw std::runtime_error("cannot rescale detector to less than 1 pixel");
+			
+			//copy everything and update size
+			GeomParam geo(*this);
+			geo.Ny = wNew;
+			geo.Nz = hNew;
+			geo.ps *= scale;
+			return geo;
 		}
 
 		//@brief: initialize / reset values with defaults
