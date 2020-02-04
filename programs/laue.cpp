@@ -82,8 +82,6 @@ try {
 	//                    Read Inputs / Build Indexers                    //
 	////////////////////////////////////////////////////////////////////////
 
-
-
 	//read master pattern
 	emsphinx::MasterSpectra<double> spec(nml.masterFile);
 
@@ -109,6 +107,7 @@ try {
 
 	if(nml.normed) {
 		//need to buid up spectra of function squared and of window
+		//also need to normalize back projected pattern properly
 		throw std::runtime_error("normalized cross correlation not yet implemented for Laue");
 		/*
 		corrs.push_back( std::unique_ptr< emsphinx::sphere::NormalizedCorrelator<double> >(new emsphinx::sphere::NormalizedCorrelator<double>(
@@ -175,6 +174,7 @@ try {
 	// std::cout << "\tBatch Size           : " << nml.batchSize << '\n';
 	std::cout << "\tThread Count         : " << 1 << '\n';
 	std::cout << "\tBatch Size           : " << 1 << '\n';
+	std::cout.flush();
 
 	////////////////////////////////////////////////////////////////////////
 	//                            Do Indexing                             //
@@ -216,6 +216,15 @@ try {
 	//for now just print to the screen
 	for(size_t i = 0; i < pats.numPat(); i++) {
 		std::cout << results[i].corr << ": " << results[i].qu[0] << ' ' << results[i].qu[1] << ' ' << results[i].qu[2] << ' ' << results[i].qu[3] << '\n'; 
+	}
+	std::cout << '\n';
+
+	//also print euler angles
+	for(size_t i = 0; i < pats.numPat(); i++) {
+		double eu[3];
+		xtal::qu2eu(results[i].qu, eu);
+		for(size_t j = 0; j < 3; j++) eu[j] *= 57.2957795131;
+		std::cout << eu[0] << ' ' << eu[1] << ' ' << eu[2] << '\n';
 	}
 
 	//done

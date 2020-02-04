@@ -129,7 +129,12 @@ namespace emsphinx {
 				buf = std::vector<char>(imBytes() * num);
 				ptr = buf.data();
 				idx = 0;//next pattern is first pattern
-				dSet.read((void*)buf.data(), H5::PredType::NATIVE_CHAR);
+
+				if     (type == H5::DataType(H5::PredType::NATIVE_UINT8 )) dSet.read((void*)buf.data(), H5::PredType::NATIVE_UINT8 );
+				else if(type == H5::DataType(H5::PredType::NATIVE_UCHAR )) dSet.read((void*)buf.data(), H5::PredType::NATIVE_UCHAR );
+				else if(type == H5::DataType(H5::PredType::NATIVE_UINT16)) dSet.read((void*)buf.data(), H5::PredType::NATIVE_UINT16);
+				else if(type == H5::DataType(H5::PredType::NATIVE_FLOAT )) dSet.read((void*)buf.data(), H5::PredType::NATIVE_FLOAT);
+				else throw std::logic_error("unsupported hdf5 data type");
 			} catch (H5::Exception& e) {//convert hdf5 exceptions into std::exception
 				std::ostringstream ss;
 				ss << "H5 error attempting to read Laue patterns:\n";

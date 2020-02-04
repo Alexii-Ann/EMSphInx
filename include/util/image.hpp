@@ -591,10 +591,10 @@ namespace image {
 	template <typename Real>
 	void LineWeight<Real>::bilinearCoeff(Real x0, Real y0, Real x1, Real y1, const size_t w, const size_t h) {
 		//convert to fractional pixels
-		x0 *= w;
-		y0 *= h;
-		x1 *= w;
-		y1 *= h;
+		x0 *= w-1;
+		y0 *= h-1;
+		x1 *= w-1;
+		y1 *= h-1;
 		pairs.clear();
  
 		//determine if line is steep and compute slope

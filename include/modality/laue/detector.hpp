@@ -130,7 +130,7 @@ namespace emsphinx {
 				//copy bandpass cutoffs
 				bPas[0] = b[0];
 				bPas[1] = b[1];
-				
+
 				//build mask of which points back project onto the detector
 				//this is equivalent to back projecting an image of 1
 				std::vector<Real> temp(sclr.wOut * sclr.hOut, 1);
@@ -157,6 +157,7 @@ namespace emsphinx {
 			doUnproject(rPat.data(), sph);
 
 			//make weighted mean 0
+		/*
 			const Real vMean = std::inner_product(omeg.begin(), omeg.end(), sph, Real(0)) / omegSm;
 			Real stdev(0);
 			std::transform(omeg.begin(), omeg.end(), sph, sph,
@@ -171,19 +172,26 @@ namespace emsphinx {
 				}
 			);
 			stdev = std::sqrt(stdev / omegSm);
+		*/
 
-			//now make standard deviation 1 and compute sqrt(sumsq(intensity))
-			Real var(0);
-			std::transform(omeg.begin(), omeg.end(), sph, sph,
-				[stdev](const Real o, const Real s){
-					if(o > Real(0)) {
-						const Real vs = s / stdev;
-						return vs;
-					} else {
-						return Real(0);
-					}
+			//make (unweighted) standard deviation 1
+			Real stdev = std::sqrt( std::inner_product(sph, sph + dim * dim, sph, Real(0)) ) / dim;
+			std::for_each(sph, sph + dim * dim,
+				[stdev](Real& v){
+					v /= stdev;
 				}
 			);
+
+			//copy to southern hemisphere with 
+			for(size_t j = 0; j < dim; j++) {
+				for(size_t i = 0; i < dim; i++) {
+					sph[dim * dim + (dim - 1 - j) * dim + (dim - 1 - i)] = sph[dim * j + i];
+				}
+			}
+
+			// static bool once = true;
+			// std::ofstream os("back.raw", std::ios::out | std::ios::binary);
+			// os.write((char*)sph, 2 * dim * dim * sizeof(Real));
 			return 1;
 		}
 
@@ -195,52 +203,71 @@ namespace emsphinx {
 			//zero out sphere
 			std::fill(sph, sph + dim * dim, Real(0));
 
+			//define some constants for consistency with fortran code
+			const double kk1 = geo.VoltageL / 1.23984193;// this is mislabeled in EMsoft
+			const double kk2 = geo.VoltageH / 1.23984193;// this is mislabeled in EMsoft
+			const double delta = geo.ps;
 			const double L = geo.sampletodetector;
-			const double kk0 = geo.VoltageL * 5067730.76;// k = E / (hbar * c), 1 keV / (hbar * c) = 5067730.76 mm^-1
-			const double kk1 = geo.VoltageH * 5067730.76;// k = E / (hbar * c), 1 keV / (hbar * c) = 5067730.76 mm^-1
-			const double kl0 = kk0 + L;
 			const double kl1 = kk1 + L;
+			const double kl2 = kk2 + L;
 			xtal::Quat<double> yquat(0.7071067811865475, 0, -0.7071067811865475, 0);
 
 			//now loop over pattern back projecting
 			image::LineWeight<double> lineWeight;
-			for(size_t j = 0; j < geo.Nz; j++) {//loop over rows
-				const double y = double(j) - double(geo.Nz)/2 * geo.ps;
-				for(size_t i = 0; i < geo.Ny; i++) {//loop over cols
-					const double x = double(i) - double(geo.Ny)/2 * geo.ps;
+			for(size_t iy = 0; iy < geo.Nz; iy++) {//loop over rows
+				const double py = (double(iy) - double(geo.Nz)/2) * delta;
+				for(size_t ix = 0; ix < geo.Ny; ix++) {//loop over cols
+					const double px = (double(ix) - double(geo.Ny)/2) * delta;
+
+					const Real vPat = pat[iy * geo.Ny + ix];
+					if(vPat < 1e-2) continue; //don't bother back projecting empty pixels
+
 					// get the azimuthal angle phi from x and y
-					const double phi = std::atan2(y, x) - 1.570796326794897;
+					const double phi = std::atan2(px, py) - 1.570796326794897;
 					const double cPhi =  std::cos(phi / 2);
 					const double sPhi = -std::sin(phi / 2);
-					const double r2 = x * x + y * y;
+					xtal::Quat<double> quat(cPhi, sPhi, 0, 0);
+					const double r2 = px * px + py * py;
 					const double r = std::sqrt(r2);
-					const double p0 = std::sqrt( kl0 * kl0 + r2 );
 					const double p1 = std::sqrt( kl1 * kl1 + r2 );
-					const double q0 = 1.0 / std::sqrt( ( p0 - kl0 ) * p0 * 2 );
-					const double q1 = 1.0 / std::sqrt( ( p1 - kl1 ) * p0 * 2 );
+					const double p2 = std::sqrt( kl2 * kl2 + r2 );
+					const double q1 = 1.0 / std::sqrt( ( p1 - kl1 ) * p1 * 2 );
+					const double q2 = 1.0 / std::sqrt( ( p2 - kl2 ) * p2 * 2 );
 
 					//compute sphere direction for kk0 and kk1
-					double n0[3] = {(kl0 - p0) * q0, 0, r * q0};
 					double n1[3] = {(kl1 - p1) * q1, 0, r * q1};
+					double n2[3] = {(kl2 - p2) * q2, 0, r * q2};
 
 					// these are the normals in the azimuthal plane (x,z); next we need to apply the rotation by phi 
 					// around x to bring the vector into the correct location
 					// also rotate these unit vectors by 90° around the y-axis so that they fall in along the equator
-					xtal::Quat<double> quat(cPhi, sPhi, 0, 0);
-					quat.rotateVector(n0, n0);
-					quat.rotateVector(n1, n1);
-					yquat.rotateVector(n0, n0);
-					yquat.rotateVector(n1, n1);
-					
+					double rn1[3], rn2[3];
+					quat.rotateVector(n1, rn1);
+					quat.rotateVector(n2, rn2);
+					yquat.rotateVector(rn1, rn1);
+					yquat.rotateVector(rn2, rn2);
+
+					if(std::signbit(rn1[2])) {
+						for(size_t j = 0; j < 3; j++) rn1[j] = -rn1[j];
+					}
+					if(std::signbit(rn2[2])) {
+						for(size_t j = 0; j < 3; j++) rn2[j] = -rn2[j];
+					}
+
 					// and project both points onto the Lambert square
-					double X0, Y0, X1, Y1;
-					square::lambert::sphereToSquare(n0[0], n0[1], n0[2], X0, Y0);
-					square::lambert::sphereToSquare(n1[0], n1[1], n1[2], X1, Y1);
+					double X1, Y1, X2, Y2;
+					square::lambert::sphereToSquare(rn1[0], rn1[1], rn1[2], X1, Y1);
+					square::lambert::sphereToSquare(rn2[0], rn2[1], rn2[2], X2, Y2);
 
 					// finally distribute intensity across square image
-					const Real vPat = pat[j * geo.Ny + i];
-					lineWeight.bilinearCoeff(X0, Y0, X1, Y1, dim, dim);
+					lineWeight.bilinearCoeff(X1, Y1, X2, Y2, dim, dim);
 					for(const std::pair< size_t, Real>& p : lineWeight.pairs) sph[p.first] += p.second * vPat;
+					
+					//use this to do bounds back projection like the Fortran version
+					// const size_t idx1 = std::round(Y1 * (dim-1)) * dim + std::round(X1 * (dim-1));
+					// const size_t idx2 = std::round(Y2 * (dim-1)) * dim + std::round(X2 * (dim-1));
+					// sph[idx1] += vPat;
+					// sph[idx2] += vPat;
 				}
 			}
 		}
