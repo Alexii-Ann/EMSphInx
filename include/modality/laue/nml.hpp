@@ -62,7 +62,7 @@ namespace emsphinx {
 			double   VoltageH        ;//higher X-Ray energy in kV
 			double   samplethickness ;//thickness of sample in 
 			double   ps              ;//pixel size in mm
-			uint16_t    Ny, Nz       ;//detector size in pixels
+			uint16_t     Ny, Nz      ;//detector size in pixels
 
 			//@brief: initialize / reset values with defaults
 			void clear();
@@ -149,7 +149,7 @@ namespace emsphinx {
 			VoltageH         = NAN;
 			samplethickness  = NAN;
 			ps               = NAN;
-			Ny = Nz = 0;
+           Ny = Nz     = 0;
 		}
 
 		//@brief: sanity check some basic values
@@ -244,7 +244,7 @@ namespace emsphinx {
 		//@note : throws an exception if check fails
 		void Namelist::sanityCheck() const {
 			if(dataFile.empty()) throw std::runtime_error("no experimental input file");
-			if(dataPath.empty()) throw std::runtime_error("no data path");
+			//if(dataPath.empty()) throw std::runtime_error("no data path");
 			if(masterFile.empty()) throw std::runtime_error("no master pattern");
 
 			if(bandPass[0] >= bandPass[1]) throw std::runtime_error("first bandpass cutoff must be less than second");
@@ -276,12 +276,12 @@ namespace emsphinx {
 			//parse inputs first
 			try {ipath      =         nml.getString("ipath"     );} catch (...) {ipath   .clear();}//if ipath isn't found we'll just use cwd
 			     dataFile   = ipath + nml.getString("dataFile"  );
-			     dataPath   =         nml.getString("dataPath"  );
+			     //dataPath   =         nml.getString("dataPath"  );
 			     masterFile = ipath + nml.getString("masterfile");
 
 			//read geometry
-			H5::Group expDir = H5::H5File(dataFile, H5F_ACC_RDONLY).openGroup(dataPath.c_str());
-			geoParam.read(expDir.openGroup("Header"));
+			H5::Group expDir = H5::H5File(dataFile, H5F_ACC_RDONLY).openGroup("NMLparameters/");
+			geoParam.read(expDir.openGroup("LaueNameList")); //
 
 			//parse image processing
 			std::vector<int> dims = nml.getInts("bandPass");
@@ -324,9 +324,9 @@ namespace emsphinx {
 			ss << "! experimental data file (hdf5) with patterns to index and geometry (relative to ipath)\n";
 			ss << " dataFile    = '" << dataFile << "',\n";
 			ss << "\n";
-			ss << "! path to experimental data folder within dataFile\n";
-			ss << " dataPath    = '" << dataPath << "',\n";
-			ss << "\n";
+//			ss << "! path to experimental data folder within dataFile\n";
+//			ss << " dataPath    = '" << dataPath << "',\n";
+//			ss << "\n";
 			ss << "! master pattern file (*.sht) with phase to index (relative to ipath)\n";
 			ss << " masterfile = " << masterFile << ",\n";
 			ss << "\n";

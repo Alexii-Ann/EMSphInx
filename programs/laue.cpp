@@ -87,8 +87,8 @@ try {
 
 	//read experimental patterns
 	emsphinx::laue::PatternFile pats;
-	pats.read(nml.dataFile, nml.dataPath + "/Data/LauePatterns");
-
+	pats.read(nml.dataFile, nml.dataPath + "/EMData/Laue/LauePatterns");
+  
 	//make sure patterns match expected shape
 	if(nml.geoParam.Ny != pats.width() || nml.geoParam.Nz != pats.height()) throw std::runtime_error("patterns don't match expected shape");
 
@@ -155,7 +155,7 @@ try {
 	std::cout << "\tsample thickness     : " << nml.geoParam.samplethickness << '\n';
 	std::cout << "\tdetector size        : " << nml.geoParam.Ny << 'x' << nml.geoParam.Nz << " (pixel size = " << nml.geoParam.ps << ")\n";
 	std::cout << '\n';
-	std::cout << "Indexing patterns from \"" << nml.dataFile << ":" << nml.dataPath << "/Data/LauePatterns\n";
+	std::cout << "Indexing patterns from \"" << nml.dataFile << ":" << "/EMData/Laue/LauePatterns\n";
 	std::cout << "\tTotal Patterns       : " << pats.numPat() << '\n';
 	std::cout << "\tPattern bitdepth     : " << pats.pixBytes() * 8 << '\n';
 	std::cout << "\tdetector ROI Mask    : " << ( !nml.mask_ib.hasShape() ? "entire detector" : nml.mask_ib.to_string() )<< '\n';
