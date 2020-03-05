@@ -79,6 +79,24 @@ namespace emsphinx {
 			//@param scale: rescaling factor, must lie in [0, min(w, h)] with values < 1 corresponding to increasing pixel density
 			//@note       : this is analogous to continuous camera binning with e.g. scale = 4.0 corresponding to 4x4 camera binning
 			GeomParam rescale(const double scale) const;
+
+			//@brief    : bilinearlly interpolate a pixel value for the given direction
+			//@param n  : unit direction to interpolate value for in the sample reference frame (pattern center is in +z direction)
+			//@param pix: [optional] location to store interpolation pixel
+			//@param flp: [optional] is the image to interpolate from flipped vertically
+			//@return   : true / false if the direction lies inside / outside the detector
+			template <typename Real>
+			bool interpolatePixel(Real const * const n, image::BiPix<Real> * const pix = NULL, const bool flp = false) const;
+
+			//@brief    : compute the rescale factor required to make average detector pixel size the same as an average pixel on a square spherical grid
+			//@param dim: side length of square spherical grid to match pixel size to
+			//@return   : geometry scale factor to make average pixel sizes the same
+			double scaleFactor(const size_t dim) const;
+
+			//@brief        : approximate the solid angle captured by a detector
+			//@param gridRes: side length of square lambert projection to grid over
+			//@return       : fractional solid angle i.e [0,1] not [0,4*pi]
+			double solidAngle(size_t gridRes) const;
 		};
 
 		//@brief: encapsulation of all the parameters needed for Laue indexing
@@ -168,8 +186,8 @@ namespace emsphinx {
 			if(sampletodetector < 5.0 || sampletodetector > 10000.0) throw std::runtime_error("unreasonable sample detector distance (outside [5, 10000] mm)");
 			if(Sx < 5.0 || Sx > 1000.0) throw std::runtime_error("unreasonable sample X (outside [5, 1000] mm)");
 			if(VoltageL > VoltageH) throw std::runtime_error("voltage upper bound must be >= lower bound");
-			if(VoltageL < 10.0 || VoltageL > 100.0) throw std::runtime_error("unreasonable voltage (outside [10, 100] kV)");
-			if(VoltageH < 10.0 || VoltageH > 100.0) throw std::runtime_error("unreasonable voltage (outside [10, 100] kV)");
+			if(VoltageL < 10.0 || VoltageL > 200.0) throw std::runtime_error("unreasonable voltage (outside [10, 200] kV)");
+			if(VoltageH < 10.0 || VoltageH > 200.0) throw std::runtime_error("unreasonable voltage (outside [10, 200] kV)");
 			if(samplethickness < 0.1 || samplethickness > 100.0) throw std::runtime_error("unreasonable sample thickness (outside [0.1, 100] mm)");
 			if(ps > 10.0 || ps < 0.0001) throw std::runtime_error("unreasonable pixel size (outside of [0.1, 10000] um");
 		}
@@ -218,6 +236,81 @@ namespace emsphinx {
 			geo.Nz = hNew;
 			geo.ps *= scale;
 			return geo;
+		}
+
+		//@brief    : bilinearlly interpolate a pixel value for the given direction
+		//@param n  : unit direction to interpolate value for in the sample reference frame (pattern center is in +z direction)
+		//@param pix: [optional] location to store interpolation pixel
+		//@param flp: [optional] is the image to interpolate from flipped vertically
+		//@return   : true / false if the direction lies inside / outside the detector
+		template <typename Real>
+		bool GeomParam::interpolatePixel(Real const * const n, image::BiPix<Real> * const pix, const bool flp) const {
+			//n is 'Ldc' in f90 code
+			//this vector is the equivalent of qq in the f90 code (n rotated by yquat)
+			//yquat = (/ 1.D0/sqrt(2.D0), 0.D0, pijk * 1.D0/sqrt(2.D0), 0.D0 /)  	
+			// Real qq[3] = {n[2], n[1], -n[0]};
+			Real qq[3] = {n[0], n[1], n[2]};
+
+			const Real Ld[2] = {
+				Real(ps * Ny) / 2,
+				Real(ps * Nz) / 2,
+			};
+
+			//choose a cone around the center of the pattern not to back project
+			//TODO replace with through beam mask
+			const Real cutoff = 5.0 * 0.01745329252;//half cone angle to exclude, should be user parameter in future
+			const Real rMin = std::sin(cutoff) * sampletodetector;//minimum radius to be outside of the through beam
+			const Real r2Min = rMin * rMin;
+
+			//compute the maximum angle captured by the detector to avoid spurious back projections at extreme angles
+			const Real qqMax = 0.5;//sampletodetector / std::sqrt(sampletodetector * sampletodetector + Ld[0] * Ld[1]);//cos( atan( detector half diagonal / detector distance )  )
+
+			//forward project the vector to the detector plane
+			const Real k = Real(2) * sampletodetector * qq[0] / (Real(2) * qq[0] * qq[0] - Real(1));
+			const Real rr[2] = {-qq[1] * k, -qq[2] * (flp ? -k : k)};//detector position in mm
+			if(std::fabs(rr[0]) < Ld[0] && std::fabs(rr[1]) < Ld[1] && std::fabs(rr[0] * rr[1]) > r2Min && std::fabs(qq[0]) < qqMax) {//if the point falls inside the field of view, then get the intensity
+				if(pix != NULL) {
+					Real rrr[2] = {//convert to units of fractional detectors
+						rr[0] / (ps * Ny) + Real(0.5),
+						rr[1] / (ps * Nz) + Real(0.5)
+					};
+
+					//convert to fractional pixels and get interpolation coefficients
+					pix->bilinearCoeff(rrr[0], rrr[1], Ny, Nz);
+				}
+
+				return true;//inside detector
+			} else {
+				return false;//outside detector
+			}
+		}
+
+		//@brief    : compute the rescale factor required to make average detector pixel size the same as an average pixel on a square spherical grid
+		//@param dim: side length of square spherical grid to match pixel size to
+		//@return   : geometry scale factor to make average pixel sizes the same
+		double GeomParam::scaleFactor(const size_t dim) const {
+			const size_t sqrPix = dim * dim * 2 - (dim - 1) * 4;//number of pixels in square grid
+			const size_t detPix = Ny * Nz;//number of pixels on detector
+			return std::sqrt(solidAngle(501) * sqrPix / detPix);
+		}
+
+		//@brief        : approximate the solid angle captured by a detector
+		//@param gridRes: side length of square lambert projection to grid over
+		//@return       : fractional solid angle i.e [0,1] not [0,4*pi]
+		double GeomParam::solidAngle(size_t gridRes) const {
+			//loop over northern hemisphere
+			double XY[2], xyz[3];
+			size_t goodPoints = 0;
+			for(size_t j = 0; j <= gridRes; j++) {//loop over rows of square projection
+				XY[1] = double(j) / gridRes;
+				for(size_t i = 0; i <= gridRes; i++) {//loop over columns of square projection
+					XY[0] = double(i) / gridRes;
+					square::lambert::squareToSphere(XY[0], XY[1], xyz[0], xyz[1], xyz[2]);
+					if(interpolatePixel(xyz)) ++goodPoints;//count this point if it falls on the detector
+				}
+			}
+			const size_t totalPoints = (gridRes * gridRes + (gridRes - 2) * (gridRes - 2));//total number of points in both hemispheres (don't double count equators)
+			return double(goodPoints) / totalPoints;//count fraction of grid points on detector
 		}
 
 		//@brief: initialize / reset values with defaults

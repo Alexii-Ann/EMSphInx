@@ -53,14 +53,11 @@ namespace emsphinx {
 		//helper for back projecting from an Laue detector -> sphere
 		template <typename Real>
 		struct BackProjector : public emsphinx::BackProjector<Real> {
-			GeomParam             geo    ;//geometry
-			const size_t          dim    ;//side length of spherical grid
-			image::Rescaler<Real> sclr   ;//pattern rescaler
-			std::vector<Real>     rPat   ;//space for pattern as real
-			fft::vector<Real>     sWrk   ;//work space for pattern rescaler
-			std::vector<Real>     omeg   ;//solid angle of each pixel (or 0 if there is no contribution from the detector)
-			Real                  omegSm ;//sum of omeg
-			size_t                bPas[2];//bandpass cutoffs
+			struct Constants;
+			const std::shared_ptr<const Constants> pLut;//read only values (can be shared across threads)
+			std::vector<Real>                      rPat;//space for pattern as real
+			fft::vector<Real>                      sWrk;//work space for pattern rescaler
+			std::vector<Real>                      iVal;//space for intermediate interpolation result
 
 			//@brief  : construct a back projector
 			//@param g: detector geometry to back project from
@@ -80,12 +77,27 @@ namespace emsphinx {
 			//@return: unique pointer to copy of current projector
 			std::unique_ptr<emsphinx::BackProjector<Real> > clone() const {return std::unique_ptr<BackProjector>(new BackProjector(*this));}
 
-			private:
+		};
 
-				//@brief: do actual backproject of an appropriately sized pattern
-				//@param pat: rescaled pattern to back project to unit sphere
-				//@param sph: location to write back projected pattern
-				void doUnproject(Real const * const pat, Real * const sph);
+		//helper struct to hold read only constants needed by BackProjector (for sharing across threads)
+		template <typename Real>
+		struct BackProjector<Real>::Constants {
+			std::vector< image::BiPix<Real> > iPts;//interpolation coefficients
+			std::vector<Real>                 omeg   ;//solid angles of iPts (relative to average spherical pixel size)
+			Real                              omgW   ;//sum of omeg (in window)
+			Real                              omgS   ;//sum of omeg (over sphere)
+			image::Rescaler<Real>             sclr   ;//pattern rescaler
+			const bool                        flip   ;//do input patterns need to be vertically flipped
+			GeomParam                         geo    ;
+			size_t                            bPas[2];//bandpass cutoffs
+
+			//@brief    : construct a back projector
+			//@param geo: detector geometry to back project from
+			//@param dim: side length of square legendre grid to back project onto
+			//@param fct: additional scale factor for detector resizing
+			//@param bp : bandpass parameters
+			//@param qu : quaternion to rotate detector location by
+			Constants(GeomParam geo, const size_t dim, const Real fct, uint16_t const * bp, Real const * const qu = NULL);
 		};
 
 	}//laue
@@ -114,6 +126,87 @@ namespace emsphinx {
 		//                           BackProjector                            //
 		////////////////////////////////////////////////////////////////////////
 
+		//@brief    : construct a back projector
+		//@param geo: detector geometry to back project from
+		//@param dim: side length of square legendre grid to back project onto
+		//@param fct: additional scale factor for detector resizing
+		//@param bp : bandpass parameters
+		//@param qu : quaternion to rotate detector location by
+		template <typename Real>
+		BackProjector<Real>::Constants::Constants(GeomParam geo, const size_t dim, const Real fct, uint16_t const * bp, Real const * const qu) :
+			sclr(geo.Ny, geo.Nz, geo.scaleFactor(dim) * fct, fft::flag::Plan::Patient),//we're going to be doing lots of 
+			geo(geo),
+			flip(false)
+		{
+			//save band pass values
+			bPas[0] = bp[0]; bPas[1] = bp[1];
+
+			//compute normals and solid angles of square legendre grid
+			std::vector<Real> xyz(dim * dim * 3);
+			square::legendre::normals(dim, xyz.data());
+			std::vector<Real> omegaRing = square::solidAngles<Real>(dim, square::Layout::Legendre);
+
+			//rescale detector
+			const Real sclFct = std::sqrt( Real(geo.Ny * geo.Nz) / (sclr.wOut * sclr.hOut));
+			GeomParam g = geo.rescale(sclFct);
+
+			//determine weights north hemisphere
+			image::BiPix<Real> p;
+			for(size_t i = 0; i < xyz.size() / 3; i++) {//loop over square legendre grid points
+				//get direction and apply rotatation
+				Real n[3];
+				if(NULL != qu) {
+					xtal::quat::rotateVector(qu, xyz.data() + 3 * i, n);
+				} else {
+					std::copy(xyz.data() + 3 * i, xyz.data() + 3 * i + 3, n);
+				}
+
+				//save interpolation weights if it hits the detector
+				if(g.interpolatePixel(n, &p, flip)) {
+					p.idx = i;
+					iPts.push_back(p);
+					omeg.push_back(omegaRing[square::ringNum(dim, i)]);
+				}
+			}
+
+			//determine weights south hemisphere
+			for(size_t i = 0; i < xyz.size() / 3; i++) {//loop over square legendre grid points
+				//split into x and y indices
+				const size_t y = i / dim;
+				if(y == 0 || y+1 == dim) continue;//dont' double count equator
+				const size_t x = i - dim * y;
+				if(x == 0 || x+1 == dim) continue;//dont' double count equator
+				xyz[3*i+2] = -xyz[3*i+2];//move normal to southern hemisphere
+
+				//get direction and apply rotatation
+				Real n[3];
+				if(NULL != qu) {
+					xtal::quat::rotateVector(qu, xyz.data() + 3 * i, n);
+				} else {
+					std::copy(xyz.data() + 3 * i, xyz.data() + 3 * i + 3, n);
+				}
+
+				//save interpolation weights if it hits the detector
+				if(g.interpolatePixel(n, &p, flip)) {
+					p.idx = i;
+					iPts.push_back(p);
+					omeg.push_back(omegaRing[square::ringNum(dim, i)]);
+				}
+			}
+
+			//accumulate solid angle sums
+			omgW = std::accumulate(omeg.cbegin(), omeg.cend(), Real(0));
+			omgS = 0;
+			for(size_t j = 0; j < dim; j++) {
+				for(size_t i = 0; i < dim; i++) {
+					const Real& o = omegaRing[square::ringNum(dim, j * dim + i)];
+					const bool eq = j == 0 || i == 0 || j == dim-1 || i == dim-1;//are we on the equator
+					omgS += o;
+					if(!eq) omgS += o;//don't double count equator
+				}
+			}
+		}
+
 		//@brief  : construct a back projector
 		//@param g: detector geometry to back project from
 		//@param d: side length of square legendre grid to back project onto
@@ -121,26 +214,10 @@ namespace emsphinx {
 		//@param b: bandpass parameters 
 		template <typename Real>
 		BackProjector<Real>::BackProjector(GeomParam g, const size_t d, const Real f, uint16_t const * b) :
-			geo(g.rescale(f)),
-			dim(d),
-			sclr(g.Ny, g.Nz, f, fft::flag::Plan::Patient),
-			rPat(std::max<size_t>(g.Ny * g.Nz, sclr.wOut * sclr.hOut)),
-			sWrk(sclr.allocateWork()),
-			omeg(d * d) {
-				//copy bandpass cutoffs
-				bPas[0] = b[0];
-				bPas[1] = b[1];
-
-				//build mask of which points back project onto the detector
-				//this is equivalent to back projecting an image of 1
-				std::vector<Real> temp(sclr.wOut * sclr.hOut, 1);
-				doUnproject(temp.data(), omeg.data());//unproject onto solid angle
-
-				//now scale omega points by solid angle of spherical pixel size
-				std::vector<Real> omegaRing = square::solidAngles<Real>(dim, square::Layout::Legendre);
-				for(size_t i = 0; i < omeg.size(); i++) omeg[i] *= omegaRing[square::ringNum(dim, i)];
-				omegSm = std::accumulate(omeg.begin(), omeg.end(), Real(0));
-			}
+			pLut(std::make_shared<const Constants>(g, d, f, b, (Real const * const)NULL)),
+			rPat(std::max<size_t>(g.Ny * g.Nz, pLut->sclr.wOut * pLut->sclr.hOut)),
+			sWrk(pLut->sclr.allocateWork()),
+			iVal(pLut->iPts.size()) {}
 
 		//@brief    : unproject a pattern from the detector to a square grid
 		//@param pat: pattern to back project to unit sphere
@@ -150,126 +227,41 @@ namespace emsphinx {
 		template <typename Real>
 		Real BackProjector<Real>::unproject(Real * const pat, Real * const sph, Real * const iq) {
 			//rescale pattern
-			Real vIq = sclr.scale(pat, rPat.data(), sWrk.data(), true, bPas[0], NULL != iq);//rescale (TODO this is where bandpass could be added in)
+			Real vIq = pLut->sclr.scale(pat, rPat.data(), sWrk.data(), true, 0, NULL != iq);//rescale TODO: this is where bandpass can be implemented (replace 0 with bPas[0], update scaler to allow high pass)
 			if(NULL != iq) *iq = vIq;//save iq value if needed
 
-			//do the back projection
-			doUnproject(rPat.data(), sph);
+			//interpolate pattern intensities and compute weighted mean
+			image::BiPix<Real> const * const pIpt = pLut->iPts.data();
+			for(size_t i = 0; i < pLut->iPts.size(); i++) iVal[i] = pIpt[i].interpolate(rPat.data());//determine interpolated values
+			const Real mean = std::inner_product(iVal.cbegin(), iVal.cend(), pLut->omeg.cbegin(), Real(0)) / pLut->omgW;//compute weighted average
 
-			//make weighted mean 0
-		/*
-			const Real vMean = std::inner_product(omeg.begin(), omeg.end(), sph, Real(0)) / omegSm;
-			Real stdev(0);
-			std::transform(omeg.begin(), omeg.end(), sph, sph,
-				[vMean,&stdev](const Real o, const Real s){
-					if(o > Real(0)) {
-						const Real vs = s - vMean;
-						stdev += vs * vs * o;
-						return vs;
-					} else {
-						return Real(0);
-					}
-				}
-			);
-			stdev = std::sqrt(stdev / omegSm);
-		*/
+			//make mean zero and compute weighted standard deviation
+			Real stdev = 0;
+			for(size_t i = 0; i < iVal.size(); i++) {
+				iVal[i] -= mean;
+				stdev += iVal[i] * iVal[i] * pLut->omeg[i];
+			}
+			stdev = std::sqrt(stdev / pLut->omgW);
 
-			//make (unweighted) standard deviation 1
-			Real stdev = std::sqrt( std::inner_product(sph, sph + dim * dim, sph, Real(0)) ) / dim;
-			std::for_each(sph, sph + dim * dim,
-				[stdev](Real& v){
-					v /= stdev;
-				}
-			);
+			if(Real(0) == stdev) {//the back projected image had no contrast
+				//copy to output grid making value uniformly 1
+				for(size_t i = 0; i < pLut->iPts.size(); i++) sph[pIpt[i].idx] = Real(1);
+				return 0;
+			} else {
+				//make standard deviation 1
+				for(size_t i = 0; i < iVal.size(); i++) iVal[i] /= stdev;
 
-			//copy to southern hemisphere with 
-			for(size_t j = 0; j < dim; j++) {
-				for(size_t i = 0; i < dim; i++) {
-					sph[dim * dim + (dim - 1 - j) * dim + (dim - 1 - i)] = sph[dim * j + i];
-				}
+				//copy to output grid making mean 0
+				// for(size_t i = 0; i < pLut->iPts.size(); i++) sph[pIpt[i].idx] = iVal[i];
+				//NOTE: this is to prevent a band of negative values around the back projected spots
+				//TODO: eliminate rescaling entirely by preprocessing laue pattern
+				for(size_t i = 0; i < pLut->iPts.size(); i++) sph[pIpt[i].idx] = std::max(iVal[i], Real(0));
+
+				//compute sum if needed
+				static const Real var = std::sqrt(pLut->omgW / pLut->omgS * emsphinx::Constants<Real>::pi * Real(4));//standard deviation within window (since we normalized to 1)
+				return var;
 			}
 
-			// static bool once = true;
-			// std::ofstream os("back.raw", std::ios::out | std::ios::binary);
-			// os.write((char*)sph, 2 * dim * dim * sizeof(Real));
-			return 1;
-		}
-
-		//@brief: do actual backproject of an appropriately sized pattern
-		//@param pat: rescaled pattern to back project to unit sphere
-		//@param sph: location to write back projected pattern
-		template <typename Real>
-		void BackProjector<Real>:: doUnproject(Real const * const pat, Real * const sph) {
-			//zero out sphere
-			std::fill(sph, sph + dim * dim, Real(0));
-
-			//define some constants for consistency with fortran code
-			const double kk1 = geo.VoltageL / 1.23984193;// this is mislabeled in EMsoft
-			const double kk2 = geo.VoltageH / 1.23984193;// this is mislabeled in EMsoft
-			const double delta = geo.ps;
-			const double L = geo.sampletodetector;
-			const double kl1 = kk1 + L;
-			const double kl2 = kk2 + L;
-			xtal::Quat<double> yquat(0.7071067811865475, 0, -0.7071067811865475, 0);
-
-			//now loop over pattern back projecting
-			image::LineWeight<double> lineWeight;
-			for(size_t iy = 0; iy < geo.Nz; iy++) {//loop over rows
-				const double py = (double(iy) - double(geo.Nz)/2) * delta;
-				for(size_t ix = 0; ix < geo.Ny; ix++) {//loop over cols
-					const double px = (double(ix) - double(geo.Ny)/2) * delta;
-
-					const Real vPat = pat[iy * geo.Ny + ix];
-					if(vPat < 1e-2) continue; //don't bother back projecting empty pixels
-
-					// get the azimuthal angle phi from x and y
-					const double phi = std::atan2(px, py) - 1.570796326794897;
-					const double cPhi =  std::cos(phi / 2);
-					const double sPhi = -std::sin(phi / 2);
-					xtal::Quat<double> quat(cPhi, sPhi, 0, 0);
-					const double r2 = px * px + py * py;
-					const double r = std::sqrt(r2);
-					const double p1 = std::sqrt( kl1 * kl1 + r2 );
-					const double p2 = std::sqrt( kl2 * kl2 + r2 );
-					const double q1 = 1.0 / std::sqrt( ( p1 - kl1 ) * p1 * 2 );
-					const double q2 = 1.0 / std::sqrt( ( p2 - kl2 ) * p2 * 2 );
-
-					//compute sphere direction for kk0 and kk1
-					double n1[3] = {(kl1 - p1) * q1, 0, r * q1};
-					double n2[3] = {(kl2 - p2) * q2, 0, r * q2};
-
-					// these are the normals in the azimuthal plane (x,z); next we need to apply the rotation by phi 
-					// around x to bring the vector into the correct location
-					// also rotate these unit vectors by 90° around the y-axis so that they fall in along the equator
-					double rn1[3], rn2[3];
-					quat.rotateVector(n1, rn1);
-					quat.rotateVector(n2, rn2);
-					yquat.rotateVector(rn1, rn1);
-					yquat.rotateVector(rn2, rn2);
-
-					if(std::signbit(rn1[2])) {
-						for(size_t j = 0; j < 3; j++) rn1[j] = -rn1[j];
-					}
-					if(std::signbit(rn2[2])) {
-						for(size_t j = 0; j < 3; j++) rn2[j] = -rn2[j];
-					}
-
-					// and project both points onto the Lambert square
-					double X1, Y1, X2, Y2;
-					square::lambert::sphereToSquare(rn1[0], rn1[1], rn1[2], X1, Y1);
-					square::lambert::sphereToSquare(rn2[0], rn2[1], rn2[2], X2, Y2);
-
-					// finally distribute intensity across square image
-					lineWeight.bilinearCoeff(X1, Y1, X2, Y2, dim, dim);
-					for(const std::pair< size_t, Real>& p : lineWeight.pairs) sph[p.first] += p.second * vPat;
-					
-					//use this to do bounds back projection like the Fortran version
-					// const size_t idx1 = std::round(Y1 * (dim-1)) * dim + std::round(X1 * (dim-1));
-					// const size_t idx2 = std::round(Y2 * (dim-1)) * dim + std::round(X2 * (dim-1));
-					// sph[idx1] += vPat;
-					// sph[idx2] += vPat;
-				}
-			}
 		}
 
 	}//laue
