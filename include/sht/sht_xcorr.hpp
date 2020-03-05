@@ -179,6 +179,10 @@ namespace emsphinx {
 			//@return: unique pointer to copy of current correlator
 			virtual std::unique_ptr<PhaseCorrelator> clone() const = 0;
 
+			//@brief : get the cross correlation from the previous call to correlate
+			//@return: cross correlation grid
+			const fft::vector<Real>& getXC() const {return Correlator<Real>::getXC();}
+
 			//@brief    : compute the rotation of the maximum (un)normalized cross correlation between two spherical functions
 			//@param gln: spherical harmonic coefficients for the template function
 			//@param eu : location to write rotation of maximum normalized cross correlation as ZYZ euler angle

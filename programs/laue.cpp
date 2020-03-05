@@ -42,7 +42,74 @@
 #include "modality/laue/imprc.hpp"
 #include "modality/laue/detector.hpp"
 
+
+#include "util/timer.hpp"
+#include "idx/master.hpp"
+#include "sht/sht_xcorr.hpp"
+#include "xtal/rotations.hpp"
+
+//@brief     : get the extension of a file name
+//@param name: file name to get extension of
+//@return    : extension (all lower case)
+std::string getFileExt(const std::string name) {
+	size_t pos = name.find_last_of(".");//find the last '.' in the name
+	if(std::string::npos == pos) return "";//handle files with no extension
+	std::string ext = name.substr(pos+1);//extract the file extension
+	std::transform(ext.begin(), ext.end(), ext.begin(), [](char c){return std::tolower(c);});//convert to lowercase
+	return ext;
+}
+
+//@brief   : read a list of xyz normals from an input stream
+//@param is: input stream to read comma separated normals from
+//@return  : list of normals
+template <typename Real>
+std::vector<Real> readNormals(std::istream& is) {
+	Real n[3];
+	char delim;//space to read common
+	std::vector<Real> normals;
+	while(is >> n[0] >> delim >> n[1] >> delim >> n[2]) {
+		normals.push_back(n[0]);
+		normals.push_back(n[1]);
+		normals.push_back(n[2]);
+	}
+	return normals;
+}
+
+//@brief         : read a list of xyz normals from a csv
+//@param fileName: csv to read normals from
+//@return        : list of normals
+template <typename Real>
+std::vector<Real> readNormalFile(std::string fileName) {
+	std::ifstream is(fileName);
+	return readNormals<Real>(is);
+}
+
+//@brief       : convert from a list of vectors to a spherical image by placing a delta function at each point
+//@param hkls  : location to read unit vectors from as x,y,z,x,y,z,...,
+//@param numDir: number of normals to read
+//@param dim   : side length of square lambert grid to write image to
+//@param nh    : location to write north hemisphere of spherical image
+//@param sh    : location to write south hemisphere of spherical image
+template <typename Real>
+void fillLambert(Real const * const hkls, const size_t numDir, const size_t dim, Real * const nh, Real * const sh) {
+	for(size_t i = 0; i < numDir; i++) {//loop over peak locations
+		//project peak from sphere to square lambert
+		Real x, y;
+		Real const * const n = hkls + 3 * i;
+		// emsphinx::square::lambert::sphereToSquare(n[0], n[1], n[2], x, y);
+		emsphinx::square::lambert::sphereToSquare(-n[0], -n[1], n[2], x, y);
+
+		//spread peak over 4 pixels (reverse bilinear interpolate)
+		image::BiPix<Real> pix;
+		pix.bilinearCoeff(x, y, dim, dim);
+		Real * const ptr = std::signbit(n[2]) ? nh : sh;
+		for(size_t j = 0; j < 4; j++) ptr[pix.inds[j]] += pix.wgts[j];
+	}
+}
+
 int main(int argc, char *argv[]) {
+
+	const bool debug = true;//should extra debug info be saved
 
 try {
 
@@ -77,13 +144,40 @@ try {
 			std::cout << "\n * * * * * * warning: some namelist parameters weren't used: " << warning << " * * * * * * \n" << std::endl;
 		}
 	}
+	const size_t dim = nml.bw % 2 == 0 ? nml.bw + 3 : nml.bw + 1;
 
 	////////////////////////////////////////////////////////////////////////
 	//                    Read Inputs / Build Indexers                    //
 	////////////////////////////////////////////////////////////////////////
 
-	//read master pattern
-	emsphinx::MasterSpectra<double> spec(nml.masterFile);
+	//blank master pattern
+	emsphinx::MasterSpectra<double> spec;//(mp, nml.bw);
+
+	if("txt" == getFileExt(nml.masterFile)) {
+		//create master pattern from directions if needed
+		std::vector<double> masterDirs;//spherical directions to place delta functions at for
+		masterDirs = readNormalFile<double>(nml.masterFile);
+		const size_t numMas = masterDirs.size() / 3;
+
+		//now build a spherical grid (square lambert) and build image from normals
+		emsphinx::MasterPattern<double> mp(dim);
+		fillLambert(masterDirs.data(), numMas, dim, mp.nh.data(), mp.sh.data());
+		mp.toLegendre();
+
+		//save out the constructed master pattern to a raw binary file
+		if(debug) {
+			std::ofstream os("mp.raw", std::ios::out | std::ios::binary);
+			os.write((char*)mp.nh.data(), mp.nh.size() * sizeof(double));
+			os.write((char*)mp.sh.data(), mp.sh.size() * sizeof(double));
+		}
+
+		//convert to square legendre harmonics
+		spec = emsphinx::MasterSpectra<double>(mp, nml.bw);
+	} else {
+		//read master pattern
+		spec = emsphinx::MasterSpectra<double>(nml.masterFile);
+
+	}
 
 	//read experimental patterns
 	emsphinx::laue::PatternFile pats;
@@ -98,7 +192,6 @@ try {
 	std::unique_ptr< emsphinx::ImageProcessor<double> > prc(std::move(lauePrc));
 
 	//create back projector
-	const size_t dim = nml.bw % 2 == 0 ? nml.bw + 3 : nml.bw + 1;
 	std::unique_ptr< emsphinx::laue::BackProjector<double> > lauePrj(new emsphinx::laue::BackProjector<double>(nml.geoParam, dim, 1.0, nml.bandPass));
 	std::unique_ptr< emsphinx::BackProjector<double> > prj(std::move(lauePrj));
 
@@ -207,11 +300,30 @@ try {
 				throw std::runtime_error("unknown laue image bitdepth");
 			break;
 		}
+
+		//write out the back projected pattern
+		if(debug) {
+			std::ofstream os("sph.raw", std::ios::out | std::ios::binary);//open a file called "out.raw" in cwd, open for binary write
+			os.write((char*)idx.sph.data(), idx.sph.size() * sizeof(double));//write sph.size() doubles to the output file from sph.data()
+		}
+
+		//write out the cross correlation grid
+		if(debug) {
+			std::ofstream os("out.raw", std::ios::out | std::ios::binary);//open a file called "out.raw" in cwd, open for binary write
+			fft::vector<double> const& xc = idx.xc[0]->getXC();
+			os.write((char*)xc.data(), xc.size() * sizeof(double));//write sph.size() doubles to the output file from sph.data()
+		}
 	}
 
 	////////////////////////////////////////////////////////////////////////
 	//                            Save Outputs                            //
 	////////////////////////////////////////////////////////////////////////
+
+	//correct for y rotation
+	xtal::Quat<double> yquat(std::sqrt(0.5), 0.0, std::sqrt(0.5) * emsphinx::pijk, 0.0);  	
+	for(size_t i = 0; i < pats.numPat(); i++) {
+		// xtal::quat::mul(results[i].qu, yquat.data(), results[i].qu);//undo 90 degree rotation @ y for back projection
+	}
 
 	//for now just print to the screen
 	for(size_t i = 0; i < pats.numPat(); i++) {
