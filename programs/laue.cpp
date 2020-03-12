@@ -322,7 +322,7 @@ try {
 	//correct for y rotation
 	xtal::Quat<double> yquat(std::sqrt(0.5), 0.0, std::sqrt(0.5) * emsphinx::pijk, 0.0);  	
 	for(size_t i = 0; i < pats.numPat(); i++) {
-		// xtal::quat::mul(results[i].qu, yquat.data(), results[i].qu);//undo 90 degree rotation @ y for back projection
+		xtal::quat::mul(results[i].qu, yquat.data(), results[i].qu);//undo 90 degree rotation @ y for back projection
 	}
 
 	//for now just print to the screen

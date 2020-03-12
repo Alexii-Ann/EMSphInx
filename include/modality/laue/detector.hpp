@@ -55,9 +55,6 @@ namespace emsphinx {
 		struct BackProjector : public emsphinx::BackProjector<Real> {
 			struct Constants;
 			const std::shared_ptr<const Constants> pLut;//read only values (can be shared across threads)
-			std::vector<Real>                      rPat;//space for pattern as real
-			fft::vector<Real>                      sWrk;//work space for pattern rescaler
-			std::vector<Real>                      iVal;//space for intermediate interpolation result
 
 			//@brief  : construct a back projector
 			//@param g: detector geometry to back project from
@@ -82,14 +79,11 @@ namespace emsphinx {
 		//helper struct to hold read only constants needed by BackProjector (for sharing across threads)
 		template <typename Real>
 		struct BackProjector<Real>::Constants {
-			std::vector< image::BiPix<Real> > iPts;//interpolation coefficients
-			std::vector<Real>                 omeg   ;//solid angles of iPts (relative to average spherical pixel size)
-			Real                              omgW   ;//sum of omeg (in window)
-			Real                              omgS   ;//sum of omeg (over sphere)
-			image::Rescaler<Real>             sclr   ;//pattern rescaler
-			const bool                        flip   ;//do input patterns need to be vertically flipped
-			GeomParam                         geo    ;
-			size_t                            bPas[2];//bandpass cutoffs
+			const bool                        flip;//do input patterns need to be vertically flipped
+			GeomParam                         geo ;
+			size_t                            dim ;//side length of spherical grid
+			std::vector<Real>                 zLat;//ring lattitudes
+			std::vector<Real>                 sNrm;//legendre normals
 
 			//@brief    : construct a back projector
 			//@param geo: detector geometry to back project from
@@ -134,77 +128,13 @@ namespace emsphinx {
 		//@param qu : quaternion to rotate detector location by
 		template <typename Real>
 		BackProjector<Real>::Constants::Constants(GeomParam geo, const size_t dim, const Real fct, uint16_t const * bp, Real const * const qu) :
-			sclr(geo.Ny, geo.Nz, geo.scaleFactor(dim) * fct, fft::flag::Plan::Patient),//we're going to be doing lots of 
 			geo(geo),
-			flip(false)
+			flip(false),
+			dim(dim)
 		{
-			//save band pass values
-			bPas[0] = bp[0]; bPas[1] = bp[1];
-
-			//compute normals and solid angles of square legendre grid
-			std::vector<Real> xyz(dim * dim * 3);
-			square::legendre::normals(dim, xyz.data());
-			std::vector<Real> omegaRing = square::solidAngles<Real>(dim, square::Layout::Legendre);
-
-			//rescale detector
-			const Real sclFct = std::sqrt( Real(geo.Ny * geo.Nz) / (sclr.wOut * sclr.hOut));
-			GeomParam g = geo.rescale(sclFct);
-
-			//determine weights north hemisphere
-			image::BiPix<Real> p;
-			for(size_t i = 0; i < xyz.size() / 3; i++) {//loop over square legendre grid points
-				//get direction and apply rotatation
-				Real n[3];
-				if(NULL != qu) {
-					xtal::quat::rotateVector(qu, xyz.data() + 3 * i, n);
-				} else {
-					std::copy(xyz.data() + 3 * i, xyz.data() + 3 * i + 3, n);
-				}
-
-				//save interpolation weights if it hits the detector
-				if(g.interpolatePixel(n, &p, flip)) {
-					p.idx = i;
-					iPts.push_back(p);
-					omeg.push_back(omegaRing[square::ringNum(dim, i)]);
-				}
-			}
-
-			//determine weights south hemisphere
-			for(size_t i = 0; i < xyz.size() / 3; i++) {//loop over square legendre grid points
-				//split into x and y indices
-				const size_t y = i / dim;
-				if(y == 0 || y+1 == dim) continue;//dont' double count equator
-				const size_t x = i - dim * y;
-				if(x == 0 || x+1 == dim) continue;//dont' double count equator
-				xyz[3*i+2] = -xyz[3*i+2];//move normal to southern hemisphere
-
-				//get direction and apply rotatation
-				Real n[3];
-				if(NULL != qu) {
-					xtal::quat::rotateVector(qu, xyz.data() + 3 * i, n);
-				} else {
-					std::copy(xyz.data() + 3 * i, xyz.data() + 3 * i + 3, n);
-				}
-
-				//save interpolation weights if it hits the detector
-				if(g.interpolatePixel(n, &p, flip)) {
-					p.idx = i;
-					iPts.push_back(p);
-					omeg.push_back(omegaRing[square::ringNum(dim, i)]);
-				}
-			}
-
-			//accumulate solid angle sums
-			omgW = std::accumulate(omeg.cbegin(), omeg.cend(), Real(0));
-			omgS = 0;
-			for(size_t j = 0; j < dim; j++) {
-				for(size_t i = 0; i < dim; i++) {
-					const Real& o = omegaRing[square::ringNum(dim, j * dim + i)];
-					const bool eq = j == 0 || i == 0 || j == dim-1 || i == dim-1;//are we on the equator
-					omgS += o;
-					if(!eq) omgS += o;//don't double count equator
-				}
-			}
+			//build zLat and sNrm
+			zLat = square::cosLats<Real>(dim, square::Layout::Legendre);
+			sNrm = square::normals<Real>(dim, square::Layout::Legendre);
 		}
 
 		//@brief  : construct a back projector
@@ -214,10 +144,7 @@ namespace emsphinx {
 		//@param b: bandpass parameters 
 		template <typename Real>
 		BackProjector<Real>::BackProjector(GeomParam g, const size_t d, const Real f, uint16_t const * b) :
-			pLut(std::make_shared<const Constants>(g, d, f, b, (Real const * const)NULL)),
-			rPat(std::max<size_t>(g.Ny * g.Nz, pLut->sclr.wOut * pLut->sclr.hOut)),
-			sWrk(pLut->sclr.allocateWork()),
-			iVal(pLut->iPts.size()) {}
+			pLut(std::make_shared<const Constants>(g, d, f, b, (Real const * const)NULL)) {}
 
 		//@brief    : unproject a pattern from the detector to a square grid
 		//@param pat: pattern to back project to unit sphere
@@ -226,42 +153,88 @@ namespace emsphinx {
 		//@param iq : location to write pattern image quality (NULL to skip computation)
 		template <typename Real>
 		Real BackProjector<Real>::unproject(Real * const pat, Real * const sph, Real * const iq) {
-			//rescale pattern
-			Real vIq = pLut->sclr.scale(pat, rPat.data(), sWrk.data(), true, 0, NULL != iq);//rescale TODO: this is where bandpass can be implemented (replace 0 with bPas[0], update scaler to allow high pass)
-			if(NULL != iq) *iq = vIq;//save iq value if needed
+			const Real uTru = pLut->geo.Dy + pLut->geo.ps * pLut->geo.Ny / 2;
+			const Real vTru = pLut->geo.Dz + pLut->geo.ps * pLut->geo.Nz / 2;
 
-			//interpolate pattern intensities and compute weighted mean
-			image::BiPix<Real> const * const pIpt = pLut->iPts.data();
-			for(size_t i = 0; i < pLut->iPts.size(); i++) iVal[i] = pIpt[i].interpolate(rPat.data());//determine interpolated values
-			const Real mean = std::inner_product(iVal.cbegin(), iVal.cend(), pLut->omeg.cbegin(), Real(0)) / pLut->omgW;//compute weighted average
+			std::fill(sph, sph + pLut->dim * pLut->dim, Real(0));//zero out north hemisphere
 
-			//make mean zero and compute weighted standard deviation
-			Real stdev = 0;
-			for(size_t i = 0; i < iVal.size(); i++) {
-				iVal[i] -= mean;
-				stdev += iVal[i] * iVal[i] * pLut->omeg[i];
+			//loop over interior pixels
+			for(size_t j = 1; j < pLut->geo.Nz - 1; j++) {
+				Real const * row[3] = {
+					pat + (j-1) * pLut->geo.Ny,//previous row
+					pat +  j    * pLut->geo.Ny,//current row
+					pat + (j+1) * pLut->geo.Ny,//next row
+				};
+
+				for(size_t i = 1; i < pLut->geo.Ny - 1; i++) {
+					//get pixel value
+					const Real v = row[1][i];
+					if(v <= Real(0)) continue;//we're only interested in positive intensity
+
+					//note: currently for flat top peaks every pixel will be found
+					//correcting this requires a second pass and a working space
+					if(v > row[1][i-1] &&//greater than left
+					   v > row[1][i+1] &&//greater than right
+					   v > row[0][i  ] &&//greater than above
+					   v > row[2][i  ] ) {//greater than above
+						//pixel is a local maxima, fit a peak
+						//f(x,y) = A * exp( -( a(x-x0)^2 + 2b(x-x0)(y-y0) +c(y-y0)^2 ) )
+						//a = cos^2(theta) / (2 sigmax^2) + sin^2(theta) / (2 sigmay^2)
+						//b =-sin(2*theta) / (4 sigmax^2) + sin(2*theta) / (4 sigmay^2)
+						//c = sin^2(theta) / (2 sigmax^2) + cos^2(theta) / (2 sigmay^2)
+						Real params[6] = {
+							Real(i),//x0
+							Real(j),//y0
+							1,//sigmax
+							1,//sigmay
+							0,//theta
+							v,//amplitude
+						};
+
+						//TODO: refine gaussian peak estimate
+
+						//TODO: skip peaks with bad fits (threshold on amplitude, and/or standard deviations)
+
+						//back project peak center to spherical direction
+						Real xyz[3] = {
+							  pLut->geo.sampletodetector,
+							-(pLut->geo.ps * params[0] - uTru),
+							  pLut->geo.ps * params[1] - vTru ,
+						};
+
+						Real mag = std::sqrt(xyz[0] * xyz[0] + xyz[1] * xyz[1] + xyz[2] * xyz[2]);
+						for(size_t k = 0; k < 3; k++) xyz[k] /= mag; // Ku
+						xyz[0] -= 1;//subtract beam direction
+						mag = std::sqrt(xyz[0] * xyz[0] + xyz[1] * xyz[1] + xyz[2] * xyz[2]);
+						for(size_t k = 0; k < 3; k++) xyz[k] /= mag; // renormalize
+
+						// rotate 90 @ y to put ring around equator
+						Real qq[3] = {xyz[2], xyz[1], -xyz[0]};//to back project around equator
+						// Real qq[3] = {xyz[0], xyz[1], xyz[2]};//to back project around beam direction
+
+						//find spherical grid point closest to pack projected direction
+						size_t inds[4];
+						square::legendre::boundingInds(pLut->dim, pLut->zLat.data(), qq, inds);
+
+						//compute dot product of bounding indices
+						Real dp[4] = {0};
+						for(size_t k = 0; k < 4; k++) dp[k] = std::inner_product(qq, qq + 3, pLut->sNrm.begin() +3*inds[k], Real(0));
+						for(size_t k = 0; k < 4; k++) sph[inds[k]] += dp[k] * params[5];
+
+						//distribute intensity around 3x3 pixel grid using von mises fisher distribution
+
+					}
+				}
 			}
-			stdev = std::sqrt(stdev / pLut->omgW);
 
-			if(Real(0) == stdev) {//the back projected image had no contrast
-				//copy to output grid making value uniformly 1
-				for(size_t i = 0; i < pLut->iPts.size(); i++) sph[pIpt[i].idx] = Real(1);
-				return 0;
-			} else {
-				//make standard deviation 1
-				for(size_t i = 0; i < iVal.size(); i++) iVal[i] /= stdev;
-
-				//copy to output grid making mean 0
-				// for(size_t i = 0; i < pLut->iPts.size(); i++) sph[pIpt[i].idx] = iVal[i];
-				//NOTE: this is to prevent a band of negative values around the back projected spots
-				//TODO: eliminate rescaling entirely by preprocessing laue pattern
-				for(size_t i = 0; i < pLut->iPts.size(); i++) sph[pIpt[i].idx] = std::max(iVal[i], Real(0));
-
-				//compute sum if needed
-				static const Real var = std::sqrt(pLut->omgW / pLut->omgS * emsphinx::Constants<Real>::pi * Real(4));//standard deviation within window (since we normalized to 1)
-				return var;
+			//fill in southern hemisphere with inversion symmetry
+			Real * const sh = sph + pLut->dim * pLut->dim;
+			for(size_t j = 0; j < pLut->dim; j++) {
+				for(size_t i = 0; i < pLut->dim; i++) {
+					sh[(pLut->dim - 1 - j) * pLut->dim + (pLut->dim - 1 - i)] = sph[pLut->dim * j + i];
+				}
 			}
-
+			return 0;
 		}
 
 	}//laue
