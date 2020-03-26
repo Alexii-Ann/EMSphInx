@@ -109,7 +109,7 @@ void fillLambert(Real const * const hkls, const size_t numDir, const size_t dim,
 
 int main(int argc, char *argv[]) {
 
-	const bool debug = true;//should extra debug info be saved
+	const bool debug = false;//should extra debug info be saved
 
 try {
 
@@ -304,6 +304,7 @@ try {
 		//write out the back projected pattern
 		if(debug) {
 			std::ofstream os("sph.raw", std::ios::out | std::ios::binary);//open a file called "out.raw" in cwd, open for binary write
+			std::cout << i << '\n';
 			os.write((char*)idx.sph.data(), idx.sph.size() * sizeof(double));//write sph.size() doubles to the output file from sph.data()
 		}
 
@@ -327,10 +328,11 @@ try {
 
 	//for now just print to the screen
 	for(size_t i = 0; i < pats.numPat(); i++) {
-		std::cout << results[i].corr << ": " << results[i].qu[0] << ' ' << results[i].qu[1] << ' ' << results[i].qu[2] << ' ' << results[i].qu[3] << '\n'; 
+		//std::cout << results[i].corr << ": " << results[i].qu[0] << ' ' << results[i].qu[1] << ' ' << results[i].qu[2] << ' ' << results[i].qu[3] << '\n'; 
+		std::cout << "(" << results[i].qu[0] << ", " << results[i].qu[1] << ", " << results[i].qu[2] << ", " << results[i].qu[3] << "),\n"; 
 	}
 	std::cout << '\n';
-
+	/*
 	//also print euler angles
 	for(size_t i = 0; i < pats.numPat(); i++) {
 		double eu[3];
@@ -338,7 +340,7 @@ try {
 		for(size_t j = 0; j < 3; j++) eu[j] *= 57.2957795131;
 		std::cout << eu[0] << ' ' << eu[1] << ' ' << eu[2] << '\n';
 	}
-
+	*/
 	//done
 	return 0;
 

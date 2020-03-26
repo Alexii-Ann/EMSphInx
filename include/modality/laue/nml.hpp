@@ -248,8 +248,8 @@ namespace emsphinx {
 			//n is 'Ldc' in f90 code
 			//this vector is the equivalent of qq in the f90 code (n rotated by yquat)
 			//yquat = (/ 1.D0/sqrt(2.D0), 0.D0, pijk * 1.D0/sqrt(2.D0), 0.D0 /)
-			// Real qq[3] = {n[2], n[1], -n[0]};//to back project around equator
-			Real qq[3] = {n[0], n[1], n[2]};//to back project in normal reference frame
+			 Real qq[3] = {n[2], n[1], -n[0]};//to back project around equator
+			//Real qq[3] = {n[0], n[1], n[2]};//to back project in normal reference frame
 
 			//detector half size in mm
 			const Real Ld[2] = {
