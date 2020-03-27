@@ -44,6 +44,7 @@ add_executable(mp2sht        ${CMAKE_CURRENT_LIST_DIR}/mp2sht.cpp        )
 add_executable(sht2png       ${CMAKE_CURRENT_LIST_DIR}/sht2png.cpp       )
 add_executable(ShtWisdom     ${CMAKE_CURRENT_LIST_DIR}/sht_wisdom.cpp    )
 add_executable(IndexLaue     ${CMAKE_CURRENT_LIST_DIR}/laue.cpp          )
+add_executable(JobBw         ${CMAKE_CURRENT_LIST_DIR}/jobbw_nml.cpp     )
 
 install(TARGETS IndexEBSD MasterXcorr mp2sht sht2png ShtWisdom COMPONENT clt DESTINATION bin) # command line tools
 
@@ -106,6 +107,7 @@ target_link_libraries(mp2sht           ${FFTW_LIBRARIES} ${HDF5_LIBRARIES})
 target_link_libraries(sht2png          ${FFTW_LIBRARIES} ${HDF5_LIBRARIES})
 target_link_libraries(ShtWisdom        ${FFTW_LIBRARIES}                  )
 target_link_libraries(IndexLaue        ${FFTW_LIBRARIES} ${HDF5_LIBRARIES})
+target_link_libraries(JobBw            ${FFTW_LIBRARIES} ${HDF5_LIBRARIES})
 
 if(${EMSPHINX_BUILD_GUIS})
 	target_link_libraries(EMSphInxEBSD ${FFTW_LIBRARIES} ${HDF5_LIBRARIES} core base propgrid html)
