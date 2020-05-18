@@ -44,6 +44,7 @@
 
 
 #include "util/timer.hpp"
+#include "util/threadpool.hpp"
 #include "idx/master.hpp"
 #include "sht/sht_xcorr.hpp"
 #include "xtal/rotations.hpp"
@@ -107,6 +108,73 @@ void fillLambert(Real const * const hkls, const size_t numDir, const size_t dim,
 	}
 }
 
+//@brief    : templated work item for a laue indexing run
+//@param out: location to write results
+//@param pat: patterns to index
+//@param idx: indexers
+//@param buf: location to extract patterns for each thread
+//@param cnt: batch size in # of patterns
+//@param ref: should refinement be used
+//@param ctr: completed pattern counter
+//@param dbg: debug flag
+template <typename TPix, typename Real>
+std::function<void(size_t)> laueWorkItem(
+	emsphinx::Result<Real> * const                             out,//orientation output is shared (each orientation is accessed by only 1 thread)
+	std::shared_ptr<emsphinx::laue::PatternFile>               pat,//patterns are shared (thread safe)
+	std::vector< std::unique_ptr< emsphinx::Indexer<Real> > >& idx,//1 indexer per thread
+	std::vector<                  std::vector< char >  >     & buf,//1 buffer per thread
+	const size_t                                               cnt,//1 buffer per thread
+	bool                                                       ref,//refinement flag
+	std::atomic<uint64_t>&                                     ctr,//counter for indexed pattern count
+	const bool                                                 dbg //debug flag
+) {
+	//@brief      : index a batch of pattern
+	//@param count: maximum number of patterns to index
+	//@param id   : id of current thread
+	return [out,pat,&idx,&buf,cnt,ref,&ctr,dbg](const size_t id){//work function
+		//choose IPF reference direction and hsl function
+		Real nx[3];
+
+		//extract patterns and get pointer to first pattern
+		const std::vector<size_t> indices = pat->extract(buf[id].data(), cnt);
+		const size_t bytes = pat->imBytes();
+		char const * ptr = buf[id].data();
+
+		//loop over patterns indexing
+		emsphinx::Result<Real> res;//we need a result for each map
+		for(const size_t i : indices) {//loop over indices to index (may not be contiguous or in order)
+			try {
+				idx[id]->indexImage((TPix*)ptr, &res, 1, ref);//index pattern
+				std::copy(res.qu, res.qu+4, out[i].qu);//save orientation
+				out[i].corr = res.corr;
+				out[i].iq   = res.iq  ;
+
+				//write out the back projected pattern
+				if(dbg && 0 == id) {
+					std::ofstream os("sph.raw", std::ios::out | std::ios::binary);//open a file called "out.raw" in cwd, open for binary write
+					std::cout << i << '\n';
+					os.write((char*)idx[i]->sph.data(), idx[i]->sph.size() * sizeof(double));//write sph.size() doubles to the output file from sph.data()
+				}
+
+				//write out the cross correlation grid
+				if(dbg && 0 == id) {
+					std::ofstream os("out.raw", std::ios::out | std::ios::binary);//open a file called "out.raw" in cwd, open for binary write
+					fft::vector<double> const& xc = idx[i]->xc[0]->getXC();
+					os.write((char*)xc.data(), xc.size() * sizeof(double));//write sph.size() doubles to the output file from sph.data()
+				}
+
+			} catch (std::exception& e) {
+				std::cout << i << ": " << e.what() << '\n';//don't let one exception stop everything
+				std::fill(out[i].qu, out[i].qu+4, Real(0));
+				out[i].corr = 0;
+				out[i].iq   = 0;
+			}
+			ctr++;//increment indexed pattern count
+			ptr += bytes;//move to next pattern
+		}
+	};
+}
+
 int main(int argc, char *argv[]) {
 
 	const bool debug = false;//should extra debug info be saved
@@ -146,6 +214,10 @@ try {
 	}
 	const size_t dim = nml.bw % 2 == 0 ? nml.bw + 3 : nml.bw + 1;
 
+	//determine number of threads
+	const size_t numThread = nml.nThread == 0 ? ThreadPool::Concurrency() : nml.nThread;
+	const size_t batchSize = 1;//currently most laue bandwidths are relatively large, we'll keep the batch size small
+
 	////////////////////////////////////////////////////////////////////////
 	//                    Read Inputs / Build Indexers                    //
 	////////////////////////////////////////////////////////////////////////
@@ -180,11 +252,11 @@ try {
 	}
 
 	//read experimental patterns
-	emsphinx::laue::PatternFile pats;
-	pats.read(nml.dataFile, nml.dataPath + "/EMData/Laue/LauePatterns");
+	std::shared_ptr<emsphinx::laue::PatternFile> pats = std::make_shared<emsphinx::laue::PatternFile>();
+	pats->read(nml.dataFile, nml.dataPath + "/EMData/Laue/LauePatterns");
   
 	//make sure patterns match expected shape
-	if(nml.geoParam.Ny != pats.width() || nml.geoParam.Nz != pats.height()) throw std::runtime_error("patterns don't match expected shape");
+	if(nml.geoParam.Ny != pats->width() || nml.geoParam.Nz != pats->height()) throw std::runtime_error("patterns don't match expected shape");
 
 	//create pattern processor
 	std::unique_ptr< emsphinx::laue::PatternProcessor<double> > lauePrc(new emsphinx::laue::PatternProcessor<double>());
@@ -225,8 +297,11 @@ try {
 
 	}
 
-	//for now just make a single indexer
-	emsphinx::Indexer<double> idx(nml.bw, std::move(prc), std::move(prj), corrs);
+	//build a single indexer for each thread
+	std::vector< std::unique_ptr< emsphinx::Indexer<double> > > indexers;
+	std::unique_ptr< emsphinx::Indexer<double> > idx(new emsphinx::Indexer<double>(nml.bw, std::move(prc->clone()), std::move(prj->clone()), corrs));//make a single indexer (good for 1 thread)
+	indexers.push_back(std::move(idx));//move original indexer onto 
+	for(size_t i = 1; i < numThread; i++) indexers.push_back( std::move(indexers.front()->clone()) );//duplicate n-1 times
 
 	////////////////////////////////////////////////////////////////////////
 	//                             Print Info                             //
@@ -249,8 +324,8 @@ try {
 	std::cout << "\tdetector size        : " << nml.geoParam.Ny << 'x' << nml.geoParam.Nz << " (pixel size = " << nml.geoParam.ps << ")\n";
 	std::cout << '\n';
 	std::cout << "Indexing patterns from \"" << nml.dataFile << ":" << "/EMData/Laue/LauePatterns\n";
-	std::cout << "\tTotal Patterns       : " << pats.numPat() << '\n';
-	std::cout << "\tPattern bitdepth     : " << pats.pixBytes() * 8 << '\n';
+	std::cout << "\tTotal Patterns       : " << pats->numPat() << '\n';
+	std::cout << "\tPattern bitdepth     : " << pats->pixBytes() * 8 << '\n';
 	std::cout << "\tdetector ROI Mask    : " << ( !nml.mask_ib.hasShape() ? "entire detector" : nml.mask_ib.to_string() )<< '\n';
 	std::cout << "\tbandpass             : " << nml.bandPass[0] << ' ' << nml.bandPass[1]  << '\n';
 	std::cout << "\n";
@@ -263,8 +338,8 @@ try {
 	std::cout << "Indexing with\n";
 	std::cout << "\tBandwidth            : " << nml.bw << '\n';
 	std::cout << "\tSide Length          : " << fft::fastSize(uint32_t(2 * nml.bw - 1)) << '\n';
-	// std::cout << "\tThread Count         : " << idxData.threadCount << '\n';
-	// std::cout << "\tBatch Size           : " << nml.batchSize << '\n';
+	std::cout << "\tThread Count         : " << numThread << '\n';
+	std::cout << "\tBatch Size           : " << batchSize << '\n';
 	std::cout << "\tThread Count         : " << 1 << '\n';
 	std::cout << "\tBatch Size           : " << 1 << '\n';
 	std::cout.flush();
@@ -274,47 +349,67 @@ try {
 	////////////////////////////////////////////////////////////////////////
 
 	//allocate workspace, output data, and get pointer to data as different data types
-	std::vector< emsphinx::Result<double> > results(pats.numPat());
-	std::vector<char> imBuff(pats.imBytes());
-	uint8_t  * const p8  = (uint8_t *) imBuff.data();
-	uint16_t * const p16 = (uint16_t*) imBuff.data();
-	float    * const p32 = (float   *) imBuff.data();
+	std::vector< emsphinx::Result<double> > results(pats->numPat());
+	std::vector< std::vector<char> > imBuff(numThread, std::vector<char>(pats->imBytes()));
 
-	//loop over images indexing
-	for(size_t i = 0; i < pats.numPat(); i++) {
-		pats.extract(imBuff.data(), 1);//get next image
-		switch(pats.pixelType()) {
-			case emsphinx::ImageSource::Bits::U8 :
-				idx.indexImage(p8 , &results[i], 1, nml.refine);
-			break;
+	//build thread work item
+	std::atomic<uint64_t> idxCtr;
+	idxCtr.store(0);
+	std::function<void(size_t)> workItem;
+	switch(pats->pixelType()) {
+		case emsphinx::ImageSource::Bits::U8 :
+			workItem = laueWorkItem<uint8_t , double>(results.data(), pats, indexers, imBuff, batchSize, nml.refine, idxCtr, debug);
+		break;
 
-			case emsphinx::ImageSource::Bits::U16:
-				idx.indexImage(p16, &results[i], 1, nml.refine);
-			break;
+		case emsphinx::ImageSource::Bits::U16:
+			workItem = laueWorkItem<uint16_t, double>(results.data(), pats, indexers, imBuff, batchSize, nml.refine, idxCtr, debug);
+		break;
 
-			case emsphinx::ImageSource::Bits::F32:
-				idx.indexImage(p32, &results[i], 1, nml.refine);
-			break;
+		case emsphinx::ImageSource::Bits::F32:
+			workItem = laueWorkItem<float   , double>(results.data(), pats, indexers, imBuff, batchSize, nml.refine, idxCtr, debug);
+		break;
 
-			case emsphinx::ImageSource::Bits::UNK:
-				throw std::runtime_error("unknown laue image bitdepth");
-			break;
-		}
-
-		//write out the back projected pattern
-		if(debug) {
-			std::ofstream os("sph.raw", std::ios::out | std::ios::binary);//open a file called "out.raw" in cwd, open for binary write
-			std::cout << i << '\n';
-			os.write((char*)idx.sph.data(), idx.sph.size() * sizeof(double));//write sph.size() doubles to the output file from sph.data()
-		}
-
-		//write out the cross correlation grid
-		if(debug) {
-			std::ofstream os("out.raw", std::ios::out | std::ios::binary);//open a file called "out.raw" in cwd, open for binary write
-			fft::vector<double> const& xc = idx.xc[0]->getXC();
-			os.write((char*)xc.data(), xc.size() * sizeof(double));//write sph.size() doubles to the output file from sph.data()
-		}
+		case emsphinx::ImageSource::Bits::UNK:
+			throw std::runtime_error("unknown laue image bitdepth");
+		break;
 	}
+
+	//build thread pool and get start time
+	ThreadPool pool(numThread);//pool
+	time_t tmStart = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+
+	//queue parallel indexing
+	Timer t;
+	const size_t numPat = pats->numPat();
+	size_t batches = numPat / batchSize;//how many batches are needed
+	if(batches * batchSize < numPat) ++batches;//extra batch for leftovers
+	for(size_t i = 0; i < batches; i++) {//loop over batches
+		const size_t start = i * batchSize;//first pattern
+		const size_t end = std::min(start + batchSize, numPat);//last pattern
+		pool.schedule(std::bind(workItem, std::placeholders::_1));//queue indexing
+	}
+
+	//wait for indexing to complete
+	const std::chrono::milliseconds uptFreq(1000);//milliseconds between updates
+	while(!pool.waitAll(uptFreq)) {
+		//get the time elapsed since we started (without resetting the reference point)
+		const double elapsed = t.poll(false);
+		const double percent = double(idxCtr) / numPat;
+		const double rate = elapsed / percent;//estimate seconds per %
+		const double remaining = rate * (1.0 - percent);//estimate seconds left
+
+		//print update
+		std::cout << '\r';
+		Timer::PrintSeconds(elapsed  , std::cout);
+		std::cout << " elapsed, " << std::fixed << std::setprecision(1) << percent * 100          << "% complete, ";
+		Timer::PrintSeconds(remaining, std::cout);
+		std::cout << " remaining   ";
+		std::cout.flush();
+	}
+
+	const double total = t.poll();
+	time_t tmEnd = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+	std::cout << '\n' << total << "s to index (" << double(numPat) / total << " pat/s)\n";
 
 	////////////////////////////////////////////////////////////////////////
 	//                            Save Outputs                            //
@@ -322,19 +417,19 @@ try {
 
 	//correct for y rotation
 	xtal::Quat<double> yquat(std::sqrt(0.5), 0.0, std::sqrt(0.5) * emsphinx::pijk, 0.0);  	
-	for(size_t i = 0; i < pats.numPat(); i++) {
+	for(size_t i = 0; i < numPat; i++) {
 		xtal::quat::mul(results[i].qu, yquat.data(), results[i].qu);//undo 90 degree rotation @ y for back projection
 	}
 
 	//for now just print to the screen
-	for(size_t i = 0; i < pats.numPat(); i++) {
+	for(size_t i = 0; i < numPat; i++) {
 		//std::cout << results[i].corr << ": " << results[i].qu[0] << ' ' << results[i].qu[1] << ' ' << results[i].qu[2] << ' ' << results[i].qu[3] << '\n'; 
 		std::cout << "(" << results[i].qu[0] << ", " << results[i].qu[1] << ", " << results[i].qu[2] << ", " << results[i].qu[3] << "),\n"; 
 	}
 	std::cout << '\n';
 	/*
 	//also print euler angles
-	for(size_t i = 0; i < pats.numPat(); i++) {
+	for(size_t i = 0; i < numPat; i++) {
 		double eu[3];
 		xtal::qu2eu(results[i].qu, eu);
 		for(size_t j = 0; j < 3; j++) eu[j] *= 57.2957795131;
