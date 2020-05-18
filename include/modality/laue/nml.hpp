@@ -106,6 +106,7 @@ namespace emsphinx {
 			std::string              dataFile       ;//pattern file (H5 with geometry and Laue patterns)
 			std::string              dataPath       ;//path to experimental data folder within dataFile
 			std::string              masterFile     ;//master pattern files
+			std::string              pSymFile       ;//file for psuedosymmetry
 
 			GeomParam                geoParam       ;//experimental geometry
 
@@ -317,7 +318,7 @@ namespace emsphinx {
 		//@brief: initialize / reset values with defaults
 		void Namelist::clear() {
 			//clear inputs
-			ipath = dataFile = dataPath = masterFile = "";
+			ipath = dataFile = dataPath = masterFile = pSymFile = "";
 
 			//clear geometry
 			geoParam.clear();
@@ -372,6 +373,7 @@ namespace emsphinx {
 			     dataFile   = ipath + nml.getString("dataFile"  );
 			     //dataPath   =         nml.getString("dataPath"  );
 			     masterFile = ipath + nml.getString("masterfile");
+			try {pSymFile   = ipath + nml.getString ("psymfile"  );} catch (...) {pSymFile.clear();}//if pSymFile isn't found no operators will be checked
 
 			//read geometry
 			H5::Group expDir = H5::H5File(dataFile, H5F_ACC_RDONLY).openGroup("NMLparameters/");
@@ -472,6 +474,11 @@ namespace emsphinx {
 			ss << "! 0 (or omitted) to estimate a reasonable value based on speed\n";
 			ss << " batchsize  = " << batchSize << ",\n";
 			ss << "\n";
+			if(!pSymFile.empty()) {
+				ss << "! file with list of pseudo symmetric rotations to check (or '' for no psym check)\n";
+				ss << " psymfile   = '" << pSymFile << "',\n";
+				ss << "\n";
+			}
 			ss << "\n";
 			ss << "!#################################################################\n";
 			ss << "! Output Files\n";

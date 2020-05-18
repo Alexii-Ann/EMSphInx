@@ -117,6 +117,7 @@ void fillLambert(Real const * const hkls, const size_t numDir, const size_t dim,
 //@param ref: should refinement be used
 //@param ctr: completed pattern counter
 //@param dbg: debug flag
+//@param sym: number of psuedosymmetry operators
 template <typename TPix, typename Real>
 std::function<void(size_t)> laueWorkItem(
 	emsphinx::Result<Real> * const                             out,//orientation output is shared (each orientation is accessed by only 1 thread)
@@ -126,12 +127,13 @@ std::function<void(size_t)> laueWorkItem(
 	const size_t                                               cnt,//1 buffer per thread
 	bool                                                       ref,//refinement flag
 	std::atomic<uint64_t>&                                     ctr,//counter for indexed pattern count
-	const bool                                                 dbg //debug flag
+	const bool                                                 dbg,//debug flag
+	const size_t                                               sym //debug flag
 ) {
 	//@brief      : index a batch of pattern
 	//@param count: maximum number of patterns to index
 	//@param id   : id of current thread
-	return [out,pat,&idx,&buf,cnt,ref,&ctr,dbg](const size_t id){//work function
+	return [out,pat,&idx,&buf,cnt,ref,&ctr,dbg,sym](const size_t id){//work function
 		//choose IPF reference direction and hsl function
 		Real nx[3];
 
@@ -141,13 +143,15 @@ std::function<void(size_t)> laueWorkItem(
 		char const * ptr = buf[id].data();
 
 		//loop over patterns indexing
-		emsphinx::Result<Real> res;//we need a result for each map
+		std::vector< emsphinx::Result<Real> > res(sym);//we need a result for each map
 		for(const size_t i : indices) {//loop over indices to index (may not be contiguous or in order)
 			try {
-				idx[id]->indexImage((TPix*)ptr, &res, 1, ref);//index pattern
-				std::copy(res.qu, res.qu+4, out[i].qu);//save orientation
-				out[i].corr = res.corr;
-				out[i].iq   = res.iq  ;
+				idx[id]->indexImage((TPix*)ptr, res.data(), res.size(), ref);//index pattern
+				for(size_t j = 0; j < res.size(); j++) {
+					std::copy(res[j].qu, res[j].qu+4, out[i*res.size()].qu);//save orientation
+					out[i*res.size()].corr = res[j].corr;
+					out[i*res.size()].iq   = res[j].iq  ;
+				}
 
 				//write out the back projected pattern
 				if(dbg && 0 == id) {
@@ -165,9 +169,11 @@ std::function<void(size_t)> laueWorkItem(
 
 			} catch (std::exception& e) {
 				std::cout << i << ": " << e.what() << '\n';//don't let one exception stop everything
-				std::fill(out[i].qu, out[i].qu+4, Real(0));
-				out[i].corr = 0;
-				out[i].iq   = 0;
+				for(size_t j = 0; j < res.size(); j++) {
+					std::fill(out[i*res.size()].qu, out[i*res.size()].qu+4, Real(0));
+					out[i*res.size()].corr = 0;
+					out[i*res.size()].iq   = 0;
+				}
 			}
 			ctr++;//increment indexed pattern count
 			ptr += bytes;//move to next pattern
@@ -216,7 +222,7 @@ try {
 
 	//determine number of threads
 	const size_t numThread = nml.nThread == 0 ? ThreadPool::Concurrency() : nml.nThread;
-	const size_t batchSize = 1;//currently most laue bandwidths are relatively large, we'll keep the batch size small
+	const size_t batchSize = nml.batchSize == 0 ? 1 : nml.batchSize;//currently most laue bandwidths are relatively large, we'll keep the batch size small
 
 	////////////////////////////////////////////////////////////////////////
 	//                    Read Inputs / Build Indexers                    //
@@ -249,6 +255,12 @@ try {
 		//read master pattern
 		spec = emsphinx::MasterSpectra<double>(nml.masterFile);
 
+	}
+
+	//add psym if needed
+	if(!nml.pSymFile.empty()) {
+		// if(1 != phases.size()) throw std::runtime_error("psuedo-symmetry files currently only supported for single phase indexing");
+		spec.addPseudoSym(nml.pSymFile);
 	}
 
 	//read experimental patterns
@@ -349,7 +361,8 @@ try {
 	////////////////////////////////////////////////////////////////////////
 
 	//allocate workspace, output data, and get pointer to data as different data types
-	std::vector< emsphinx::Result<double> > results(pats->numPat());
+	const size_t numSym = spec.pseudoSym().empty() ? 1 : spec.pseudoSym().size();
+	std::vector< emsphinx::Result<double> > results(pats->numPat() * numSym);
 	std::vector< std::vector<char> > imBuff(numThread, std::vector<char>(pats->imBytes()));
 
 	//build thread work item
@@ -358,15 +371,15 @@ try {
 	std::function<void(size_t)> workItem;
 	switch(pats->pixelType()) {
 		case emsphinx::ImageSource::Bits::U8 :
-			workItem = laueWorkItem<uint8_t , double>(results.data(), pats, indexers, imBuff, batchSize, nml.refine, idxCtr, debug);
+			workItem = laueWorkItem<uint8_t , double>(results.data(), pats, indexers, imBuff, batchSize, nml.refine, idxCtr, debug, numSym);
 		break;
 
 		case emsphinx::ImageSource::Bits::U16:
-			workItem = laueWorkItem<uint16_t, double>(results.data(), pats, indexers, imBuff, batchSize, nml.refine, idxCtr, debug);
+			workItem = laueWorkItem<uint16_t, double>(results.data(), pats, indexers, imBuff, batchSize, nml.refine, idxCtr, debug, numSym);
 		break;
 
 		case emsphinx::ImageSource::Bits::F32:
-			workItem = laueWorkItem<float   , double>(results.data(), pats, indexers, imBuff, batchSize, nml.refine, idxCtr, debug);
+			workItem = laueWorkItem<float   , double>(results.data(), pats, indexers, imBuff, batchSize, nml.refine, idxCtr, debug, numSym);
 		break;
 
 		case emsphinx::ImageSource::Bits::UNK:
@@ -417,14 +430,15 @@ try {
 
 	//correct for y rotation
 	xtal::Quat<double> yquat(std::sqrt(0.5), 0.0, std::sqrt(0.5) * emsphinx::pijk, 0.0);  	
-	for(size_t i = 0; i < numPat; i++) {
+	for(size_t i = 0; i < numPat * numSym; i++) {
 		xtal::quat::mul(results[i].qu, yquat.data(), results[i].qu);//undo 90 degree rotation @ y for back projection
 	}
 
 	//for now just print to the screen
 	for(size_t i = 0; i < numPat; i++) {
-		//std::cout << results[i].corr << ": " << results[i].qu[0] << ' ' << results[i].qu[1] << ' ' << results[i].qu[2] << ' ' << results[i].qu[3] << '\n'; 
-		std::cout << "(" << results[i].qu[0] << ", " << results[i].qu[1] << ", " << results[i].qu[2] << ", " << results[i].qu[3] << "),\n"; 
+		const size_t ii = numSym * i;//only print max for each item
+		//std::cout << results[ii].corr << ": " << results[ii].qu[0] << ' ' << results[ii].qu[1] << ' ' << results[ii].qu[2] << ' ' << results[ii].qu[3] << '\n'; 
+		std::cout << "(" << results[ii].qu[0] << ", " << results[ii].qu[1] << ", " << results[ii].qu[2] << ", " << results[ii].qu[3] << "),\n"; 
 	}
 	std::cout << '\n';
 	/*
