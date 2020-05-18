@@ -20,4 +20,4 @@ int main(int argc, char *argv[]){
   for(size_t j = 0; j < bw*bw; j++) {
       csv2 << leg[3*j+0] << ',' << leg[3*j+1] << ',' << leg[3*j+2] << '\n';
   }
-  
+}
